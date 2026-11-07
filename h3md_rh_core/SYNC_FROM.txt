@@ -1,0 +1,2 @@
+main version 0.3.5
+main commit 809a6a59e03bd220d3ae41834c92f1439bdbfcbe v0.3.5: motion copy (TARA) shot length rounds down at the clip end; Duration line follows the real length; float-noise fix
