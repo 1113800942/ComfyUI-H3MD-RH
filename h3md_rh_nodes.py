@@ -252,7 +252,7 @@ class H3MDSaveVideoRH(FS.H3MDSaveVideoFaceRefineInterp):
 def _tara_class():
     from .h3md_rh_tara import minimax_h3_native_temporal as NT
 
-    AUTO = "auto (flash, else flex)"
+    AUTO = "auto (flash / kitchen / flex)"
 
     class H3MDTaraRH(NT.BFSMiniMaxH3NativeTemporal):
         CATEGORY = CATEGORY
@@ -264,13 +264,14 @@ def _tara_class():
         def INPUT_TYPES(cls):
             spec = copy.deepcopy(NT.BFSMiniMaxH3NativeTemporal.INPUT_TYPES())
             spec["optional"]["attention_backend"] = ([AUTO] + list(NT.BACKENDS), {"default": AUTO, "tooltip":
-                "auto: flash partitions when this PyTorch build has flash attention (Linux / RunningHub), otherwise "
-                "flex (original). 自动：有 flash 用 flash，没有用 flex。"})
+                "auto: flash partitions when this PyTorch build has flash attention (Linux / RunningHub); else comfy "
+                "kitchen frame-wise when comfy-kitchen is installed (Windows); else flex (needs torch.compile). "
+                "自动：flash → kitchen → flex"})
             return spec
 
         def apply(self, model, *args, attention_backend=AUTO, **kwargs):
             if attention_backend == AUTO:
-                attention_backend = NT.BACKENDS[0] if flash_ok() else NT.BACKENDS[1]
+                attention_backend = auto_backend(NT)
                 LOG.info("%s TARA backend: %s", _TAG, attention_backend)
             return super().apply(model, *args, attention_backend=attention_backend, **kwargs)
 
@@ -278,6 +279,17 @@ def _tara_class():
 
 
 _FLASH = None
+
+
+def auto_backend(NT) -> str:
+    if flash_ok():
+        return NT.BACKENDS[0]
+    try:
+        from .h3md_rh_tara import minimax_h3_temporal_kitchen as K
+        K.kitchen_function()
+        return NT.BACKENDS[2]
+    except Exception:
+        return NT.BACKENDS[1]
 
 
 def flash_ok() -> bool:
