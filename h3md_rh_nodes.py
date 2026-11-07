@@ -252,13 +252,49 @@ class H3MDSaveVideoRH(FS.H3MDSaveVideoFaceRefineInterp):
 def _tara_class():
     from .h3md_rh_tara import minimax_h3_native_temporal as NT
 
+    AUTO = "auto (flash, else flex)"
+
     class H3MDTaraRH(NT.BFSMiniMaxH3NativeTemporal):
         CATEGORY = CATEGORY
         DESCRIPTION = ("TARA native temporal alignment for motion copy (H3MD RH build of BFSMiniMaxH3NativeTemporal "
                        "by Alisson Anjos, ComfyUI-BFSNodes, GPL-3.0). Put it on the LOW-RES model line, after the "
                        "TARA motion-transfer LoRA, with no Sage attention on that line. Never downloads anything.")
 
+        @classmethod
+        def INPUT_TYPES(cls):
+            spec = copy.deepcopy(NT.BFSMiniMaxH3NativeTemporal.INPUT_TYPES())
+            spec["optional"]["attention_backend"] = ([AUTO] + list(NT.BACKENDS), {"default": AUTO, "tooltip":
+                "auto: flash partitions when this PyTorch build has flash attention (Linux / RunningHub), otherwise "
+                "flex (original). 自动：有 flash 用 flash，没有用 flex。"})
+            return spec
+
+        def apply(self, model, *args, attention_backend=AUTO, **kwargs):
+            if attention_backend == AUTO:
+                attention_backend = NT.BACKENDS[0] if flash_ok() else NT.BACKENDS[1]
+                LOG.info("%s TARA backend: %s", _TAG, attention_backend)
+            return super().apply(model, *args, attention_backend=attention_backend, **kwargs)
+
     return H3MDTaraRH, NT
+
+
+_FLASH = None
+
+
+def flash_ok() -> bool:
+    """True when this PyTorch build runs the flash SDPA kernel (Windows wheels usually do not)."""
+    global _FLASH
+    if _FLASH is None:
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                _FLASH = False
+            else:
+                q = torch.zeros(1, 1, 8, 64, device="cuda", dtype=torch.bfloat16)
+                torch.ops.aten._scaled_dot_product_flash_attention(q, q, q)
+                _FLASH = True
+        except Exception:
+            _FLASH = False
+    return _FLASH
 
 
 NODE_CLASS_MAPPINGS = {
