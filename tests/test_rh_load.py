@@ -28,7 +28,10 @@ base = dict(who='a woman in a "red" dress\nwith {braces}', scene="a beach", aspe
 plan, n, total, summ, info, text = d.build_rh("mv", image=img, audio=aud, **base)
 raw = json.loads(text)
 print("mv", n, total, plan["width"], plan["height"], [s["audios"][0]["offset"] for s in raw["segments"]][:3])
-assert n == 8 and raw["segments"][1]["audios"][0]["offset"] == 26.125
+# 0.4.3-rh1: 30 s cap -> 3 shots of 226 frames (9.42 s), song offsets follow the shot length
+assert n == 3 and [s["length"] for s in raw["segments"]] == [226] * 3 and total <= 720, (n, total)
+assert raw["segments"][1]["audios"][0]["offset"] == round(16.0 + 226 / 24, 3)
+assert "windowMode" not in raw, "mv is hard cuts only: no window mode"
 assert '"red"' not in raw["segments"][0]["prompt"] and "{braces}" not in raw["segments"][0]["prompt"]
 
 # guide video: 7.5 s 480x720 with audio
@@ -60,4 +63,84 @@ try:
     d.build_rh("mv", image=img, **base); raise SystemExit("mv without audio should fail")
 except ValueError as e:
     print("ok error:", str(e)[:60])
+
+# ---------------------------------------------------------------- 0.4.3-rh1 additions
+import shutil as _sh
+# caps: max_seconds above 30 -> 30; megapixels above 1 -> 1 MP
+plan, n, total, *_ = d.build_rh("mv", image=img, audio=aud, **dict(base, max_seconds=45.0, megapixels=4.0))
+assert total <= 720 and plan["width"] * plan["height"] <= 1_050_000, (total, plan["width"], plan["height"])
+plan, n, total, *_ = d.build_rh("mv", image=img, audio=aud, **dict(base, max_seconds=20.0))
+assert n == 2 and total <= 480, (n, total)
+# story: 7 lines do not fit in 30 s at >= 4.5 s each -> first 6 kept, summary says so
+plan, n, total, summ, info, text = d.build_rh("story", image=img, **dict(base, shots="\n".join(f"shot {i}" for i in range(7))))
+assert n == 6 and total <= 720 and "dropped" in summ, (n, total, summ[:200])
+print("caps ok: story 7 lines ->", n, "shots,", total, "frames")
+
+# motion copy: seamless on -> window mode in the plan; off -> segments
+plan, n, total, summ, info, text = d.build_rh("motion_copy", image=img, image_2=img, video=V(), seamless=True,
+                                              **dict(base, aspect="follow video"))
+assert json.loads(text).get("windowMode") is True and plan.get("windowMode"), "seamless must write windowMode"
+assert (plan["windowMode"] or {}).get("chain") is True
+plan_off, *_ = d.build_rh("motion_copy", image=img, image_2=img, video=V(), seamless=False,
+                          **dict(base, aspect="follow video"))
+assert not plan_off.get("windowMode")
+# no core context windows -> falls back to segments, says so, no error
+_real = N.core_windows_available
+N.core_windows_available = lambda: False
+try:
+    plan_fb, n_fb, total_fb, summ_fb, *_ = d.build_rh("motion_copy", image=img, image_2=img, video=V(), seamless=True,
+                                                      **dict(base, aspect="follow video"))
+finally:
+    N.core_windows_available = _real
+assert not plan_fb.get("windowMode") and "segment by segment" in summ_fb, summ_fb[:200]
+print("seamless ok: on -> window mode, off / no core node -> segments")
+
+# Loop RH: 8-bit cache forced, leftover cache removed, temp disk checked before the run
+LS = sys.modules["h3md_rh.h3md_rh_core.h3md_loop_split"]
+seen = {}
+_orig_run = LS.H3MDLoopSampler2.run
+LS.H3MDLoopSampler2.run = lambda self, options=None, **kw: seen.update(options=options, kw=kw) or ("ran",)
+cache_root = N._temp_dir(N.CACHE_SUB)
+os.makedirs(os.path.join(cache_root, "old_task_seg"), exist_ok=True)
+open(os.path.join(cache_root, "old_task_seg", "f.npy"), "wb").write(b"x" * 10)
+try:
+    out = N.H3MDLoopSamplerRH().run(options={"cache_dtype": "fp16"}, plan=plan, resume_from_cache=False)
+    assert out == ("ran",) and seen["options"]["cache_dtype"] == "uint8", seen["options"]
+    assert seen["options"]["cache_dir"] == cache_root and not os.listdir(cache_root), os.listdir(cache_root)
+    # resume on: leftovers kept
+    os.makedirs(os.path.join(cache_root, "keep_me"), exist_ok=True)
+    N.H3MDLoopSamplerRH().run(options=None, plan=plan, resume_from_cache=True)
+    assert os.listdir(cache_root) == ["keep_me"]
+    # not enough disk -> clear error before anything runs
+    _du = N.shutil.disk_usage
+    N.shutil.disk_usage = lambda p: _sh._ntuple_diskusage(100, 99, 1)
+    try:
+        N.H3MDLoopSamplerRH().run(options=None, plan=plan, resume_from_cache=True)
+        raise SystemExit("preflight should fail on a full disk")
+    except RuntimeError as e:
+        assert "temp disk" in str(e) and "临时盘" in str(e)
+        print("ok preflight error:", str(e)[:90])
+    finally:
+        N.shutil.disk_usage = _du
+finally:
+    LS.H3MDLoopSampler2.run = _orig_run
+    _sh.rmtree(cache_root, ignore_errors=True)
+# custom plan_json gets the same limits: 40 s or 1920x1088 -> clear error
+st_text = d.build_rh("story", image=img, **dict(base, shots="one line"))[5]
+big = json.loads(st_text); big["segments"][0]["length"] = 960
+for bad, why in ((dict(big), "s limit"), (dict(json.loads(st_text), width=1920, height=1088), "MP limit")):
+    try:
+        d.build_rh("custom", **dict(base, plan_json=json.dumps(bad))); raise SystemExit("custom over limit must fail")
+    except ValueError as e:
+        assert why in str(e), str(e)
+print("custom plan limits ok")
+# Director: media copies of an earlier task are replaced, this task's copies exist
+md = N._media_dir(); open(os.path.join(md, "img_oldtask.png"), "wb").write(b"x")
+plan, n, total, summ, info, text = d.build_rh("story", image=img, **dict(base, shots="one line"))
+left = os.listdir(md)
+assert "img_oldtask.png" not in left and any(f.startswith("img_") for f in left), left
+assert all(os.path.isfile(m["file"]) for m in json.loads(text)["media"]["images"])
+est = N.cache_estimate_bytes({"width": 1920, "height": 1088, "segments": [{"length": 1}]})
+assert est == 1920 * 1088 * 3     # 6.3 MB per 1920x1088 frame, as measured on 11-08
+print("loop RH ok: uint8 forced, leftovers cleared, disk checked")
 print("ALL OK")

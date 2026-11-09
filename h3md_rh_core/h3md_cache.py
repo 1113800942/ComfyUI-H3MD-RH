@@ -165,10 +165,7 @@ def _file_sig(file: str):
         return [file, None, None]
 
 
-def segment_signature(plan: dict, k: int) -> dict:
-    """Everything of segment k that changes its output (prompt, refs, windows, geometry, media files + stat)."""
-    seg = plan["segments"][k]
-    media = plan["media"]
+def _used_files(seg: dict, media: dict) -> list:
     used = [("images", i) for i in seg["images"]] + [("videos", v["id"]) for v in seg["videos"]]
     used += [("audios", a) for a in seg["audios"]]
     if seg.get("audioMode") == "locked" and seg.get("locked"):
@@ -178,9 +175,29 @@ def segment_signature(plan: dict, k: int) -> dict:
     for kind, ref in used:
         info = media.get(kind, {}).get(ref, {})
         files.append([kind, ref, info, _file_sig(info.get("file", ""))])
+    return files
+
+
+def segment_signature(plan: dict, k: int) -> dict:
+    """Everything of segment k that changes its output (prompt, refs, windows, geometry, media files + stat)."""
+    seg = plan["segments"][k]
+    media = plan["media"]
+    files = _used_files(seg, media)
     keep = ("startFrame", "length", "overlapIn", "prompt", "images", "videos", "audios", "audioMode", "locked")
     sig = {"seg": {key: seg.get(key) for key in keep}, "files": files,
            "size": [plan.get("width"), plan.get("height")]}
+    # window-exp: only window-mode plans get these keys, so every other plan keeps its old cache keys
+    if plan.get("windowMode"):
+        sig["windowMode"] = {k: v for k, v in plan["windowMode"].items() if k not in ("preview", "redraw")}
+        if seg.get("windowPrompts"):
+            sig["windowPrompts"] = seg["windowPrompts"]
+        if seg.get("windowCuts"):
+            sig["windowCuts"] = seg["windowCuts"]
+        if seg.get("groupParts"):   # 3e: every shot of the group, with its own media files
+            sig["groupParts"] = [{"start": gp["start"], "end": gp["end"], "origin": gp["origin"], "prompt": gp["prompt"],
+                                  "seg": {k: gp["seg"].get(k) for k in keep},
+                                  "files": _used_files(gp["seg"], media)}   # 11-08: pictures + sound too
+                                 for gp in seg["groupParts"]]
     # refVideoHeight: only non-native values enter the key, so native (and old plans) keep their old keys
     rvh = D.normalize_ref_video_height(plan.get("refVideoHeight")) or "native"
     if rvh != "native" and seg["videos"]:
@@ -223,6 +240,16 @@ def segment_uses_cont_settings(seg: dict, continued: bool, tiling: bool) -> bool
     return bool(continued) or (bool(tiling) and seg.get("audioMode") == "locked")
 
 
+def allowed_cache_root(root: str) -> bool:
+    """v0.3.7: where a cache_dir may point. Own machine: inside a <drive>/H3MD_cache folder, ComfyUI's output / temp
+    folder or a folder listed in the H3MD config file. Shared ComfyUI: ComfyUI's output / temp folder or a config
+    folder only (h3md_paths)."""
+    roots = D.PATHS.write_roots()
+    if not D.PATHS.shared():
+        roots = roots + [os.path.join(b, FOLDER) for b in _candidates()]
+    return D.PATHS.inside(root, roots)
+
+
 def segment_key(settings_hash: str, plan: dict, k: int, seed: int, continued: bool, prev_key: str | None) -> str:
     """Chain key: a continuation also depends on the previous segment's key (its tail is our prefix)."""
     return _sha({"settings": settings_hash, "segment": segment_signature(plan, k), "seed": int(seed),
@@ -231,14 +258,16 @@ def segment_key(settings_hash: str, plan: dict, k: int, seed: int, continued: bo
 
 class SegmentCache:
     def __init__(self, root: str | None, settings_hash: str, resume: bool, dtype: str = "fp16"):
-        if root and D.PATHS.shared() and not D.PATHS.inside(root, D.PATHS.read_roots()):
-            LOG.warning("%s cache_dir '%s' is outside ComfyUI's folders on a shared ComfyUI; using the default", _TAG, root)
+        if root and not allowed_cache_root(root):
+            LOG.warning("%s cache_dir '%s' is not inside a <drive>/%s folder, ComfyUI's output / temp folder or a folder "
+                        "listed in %s; using the default", _TAG, root, FOLDER, D.PATHS.config_path() or "h3md/config.json")
             root = None
         root = os.path.abspath(root or default_root())
-        if resume and D.PATHS.shared() and os.environ.get("H3MD_SHARED_RESUME", "") != "1":
+        if resume and D.PATHS.shared() and not D.PATHS.shared_resume():
             # resume_<settings hash> is shared by every run with the same settings: on a shared ComfyUI another
-            # person's segments could be picked up. Fresh run folder instead (H3MD_SHARED_RESUME=1 to allow).
-            LOG.warning("%s shared ComfyUI: resume_from_cache off for this run (set H3MD_SHARED_RESUME=1 to allow)", _TAG)
+            # person's segments could be picked up. Fresh run folder instead ("shared_resume": true allows it).
+            LOG.warning("%s shared ComfyUI: resume_from_cache off for this run (\"shared_resume\": true in %s allows it)",
+                        _TAG, D.PATHS.config_path() or "h3md/config.json")
             resume = False
         if resume:
             name = "resume_" + settings_hash[:16]
@@ -336,6 +365,22 @@ class SegmentCache:
         if moved:
             LOG.info("%s segment %d: old files moved to %s", _TAG, k + 1, folder)
         return moved
+
+    def restore(self, k, folder: str) -> list:
+        """Undo archive(): segment k's files in `folder` go back in place (a half-written new version of the same
+        files is removed first).  Returns the restored file names."""
+        back = []
+        for suf in self.SEG_FILES:
+            dst = self._p(k, suf)
+            src = os.path.join(folder, os.path.basename(dst))
+            if os.path.isfile(src):
+                if os.path.isfile(dst):
+                    os.remove(dst)
+                os.replace(src, dst)
+                back.append(os.path.basename(dst))
+        if back:
+            LOG.info("%s segment %d: previous version restored from %s", _TAG, k + 1, folder)
+        return back
 
     def adopt(self, k, key: str):
         """Rerun mode: a kept segment gets the new chain key (its predecessor or the refs changed), so a later

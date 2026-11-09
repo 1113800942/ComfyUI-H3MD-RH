@@ -63,10 +63,12 @@ try:
     from . import h3md_vram
     from . import h3md_autosplit as AS   # H3MD autosplit (2026-10-27)
     from . import h3md_paths as PATHS    # v0.2.1: shared-ComfyUI path limits
+    from . import h3md_window as WIN     # window-exp branch (2026-11-07)
 except ImportError:  # flat import (tests)
     import h3md_vram
     import h3md_autosplit as AS
     import h3md_paths as PATHS
+    import h3md_window as WIN
 
 LOG = logging.getLogger("H3MD")
 
@@ -476,6 +478,12 @@ def parse_plan(plan_json, width: int = 0, height: int = 0, continuity: bool = Fa
     # 2026-10-20: no maximum shot length and no automatic splitting.  Legacy split keys (plan/shot
     # maxSegmentLength, subOverlap, shot subPrompts) are accepted with any value and ignored.
     legacy = [k for k in ("maxSegmentLength", "subOverlap") if raw.get(k) is not None]
+    # window-exp (2026-11-07): window mode = one sampling run per shot with core context windows (no autosplit)
+    window_mode = WIN.normalize_window_mode(raw.get("windowMode"))
+    if window_mode is not None and not (isinstance(raw.get("windowMode"), dict) and raw["windowMode"].get("groupLength")):
+        window_mode["groupLength"], why = WIN.auto_group_length(w, h)   # 11-07: RAM, not VRAM, limits a group
+        notes.append(f"window mode: groups up to {window_mode['groupLength']} frames "
+                     f"({window_mode['groupLength'] / FPS:.0f} s) - {why}")
 
     segs_raw = raw.get("segments") or []
     if not segs_raw:
@@ -498,7 +506,9 @@ def parse_plan(plan_json, width: int = 0, height: int = 0, continuity: bool = Fa
         requested = int(requested) if requested is not None and i > 0 and overlap > 0 else overlap
         content = video_content_frames(s, media["videos"])
         avail = video_available_frames(s, media["videos"])
-        motion = is_motion_copy(global_prompt, s.get("prompt", ""))
+        # 11-08: its own name - it used to overwrite the `motion` argument (the reference-motion profile for
+        # autosplit), so autosplit never placed its cuts at quiet moments of the guide (0.3.5 bug)
+        motion_copy = is_motion_copy(global_prompt, s.get("prompt", ""))
         if i > 0 and valid_overlap(requested) and requested not in OVERLAP_STEPS:
             notes.append(f"WARNING segment {n} overlapIn {requested} is not one of 0/22/39 (older plan); kept as saved")
         if content is not None:
@@ -506,11 +516,11 @@ def parse_plan(plan_json, width: int = 0, height: int = 0, continuity: bool = Fa
             if cont:
                 # no length cap: the requested overlap is always kept, the new content follows the overlap
                 overlap = requested
-                auto_len = fit_video_length(overlap, content, avail, motion)
+                auto_len = fit_video_length(overlap, content, avail, motion_copy)
                 if i > 0 and overlap != int(s.get("overlapIn", 0) or 0):
                     lengths_moved = True
             else:
-                auto_len = fit_video_length(0, content, avail, motion)
+                auto_len = fit_video_length(0, content, avail, motion_copy)
             if length is not None and int(length) != auto_len:
                 lengths_moved = True
                 what = (f"overlap {overlap} + {content / FPS:.2f}s new content" if i > 0 and overlap > 0
@@ -606,6 +616,14 @@ def parse_plan(plan_json, width: int = 0, height: int = 0, continuity: bool = Fa
                 # H3MD lockrule (2026-10-26): the locked start follows the video's start by rule (stale saved
                 # offsets are replaced): start - overlapIn/24 (syncfix: may be negative = leading silence)
                 locked["offset"] = video_lock_offset(lref["trimStart"], overlap)
+        # YJ 11-07: the depth / pose control (Fun ControlNet) is switched off by window mode and by motion copy (TARA):
+        # the video stays as a normal reference video (TARA's guide), no depth / pose model, no ControlNet
+        if (window_mode is not None or motion_copy) and any(r.get("depth") for r in videos):
+            for r in videos:
+                if r.pop("depth", None):
+                    r.pop("sam3Prompt", None)
+                    notes.append(f"segment {n}: depth / pose control off ({'window mode' if window_mode is not None else 'motion copy'}); "
+                                 f"video '{r['id']}' is used as a normal reference video")
 
         seg = {
             "index": i, "startFrame": start, "length": length, "overlapIn": overlap,
@@ -618,6 +636,37 @@ def parse_plan(plan_json, width: int = 0, height: int = 0, continuity: bool = Fa
         }
         if not seg["prompt"]:
             raise ValueError(f"H3MD Director: segment {n} has no prompt (segment prompt and globalPrompt empty)")
+        if s.get("windowPrompts"):
+            if window_mode is None:
+                notes.append(f"segment {n}: windowPrompts ignored (windowMode is off)")
+            else:
+                seg["windowPrompts"] = WIN.normalize_window_prompts(
+                    s.get("windowPrompts"), length, lambda t: resolve_prompt(global_prompt, global_mode, t))
+        elif window_mode is not None:
+            # H3MD window 3a (2026-11-07): "[12s] ..." marks in detailed_description -> one prompt per window, each
+            # action given to exactly one window (no action replayed by two windows)
+            auto = WIN.auto_window_prompts(seg["prompt"], length, window_mode["length"], window_mode["overlap"],
+                                           chain=bool(window_mode.get("chain")))
+            if auto:
+                seg["windowPrompts"] = [{k: a[k] for k in ("start", "end", "prompt")} for a in auto]
+                if auto[0].get("removed"):
+                    notes.append(f"segment {n}: summary sentences about the order of events left out of the window "
+                                 f"prompts (each window gets the summary): {auto[0]['removed']}")
+                seg["windowPromptsAuto"] = True
+                if window_mode.get("refs", True) and seg["images"]:   # 3c: pictures follow the windows
+                    for wp, a in zip(seg["windowPrompts"], auto):
+                        kept, wp["prompt"] = WIN.window_refs(wp["prompt"], len(seg["images"]), a.get("own"))
+                        if len(kept) < len(seg["images"]):
+                            wp["images"] = kept
+                    used = [len(wp.get("images", seg["images"])) for wp in seg["windowPrompts"]]
+                    if any(u < len(seg["images"]) for u in used):
+                        notes.append(f"segment {n}: pictures per window {used} (of {len(seg['images'])})")
+                cuts = WIN.prompt_cuts(seg["prompt"])
+                if cuts:   # 3b: '[Ns cut]' marks -> window boundaries without fusion (snapped to 17 frames)
+                    seg["windowCuts"] = [17 * round(c / 17) for c in cuts]
+                    notes.append(f"segment {n}: hard cuts at frames {seg['windowCuts']} (windows end / start there)")
+                notes.append(f"segment {n}: time marks -> {len(auto)} window prompts (actions per window: "
+                             + ", ".join(str(a["events"]) for a in auto) + ")")
         seg["labels"] = compute_labels(seg, media)
         n_soundtracks = sum(1 for lab in seg["labels"] if lab["kind"] == "video_soundtrack")
         if n_soundtracks > MAX_VIDEOS:
@@ -629,20 +678,31 @@ def parse_plan(plan_json, width: int = 0, height: int = 0, continuity: bool = Fa
     # H3MD autosplit (2026-10-27): over-budget shots -> equal continuation parts (plan "autoSplit": false = off)
     rvh_mode = normalize_ref_video_height(raw.get("refVideoHeight")) or "native"
     budget_info = None
-    if budget is None and raw.get("autoSplit", True) is not False:
+    if window_mode is not None:
+        notes.append(f"window mode: windows {window_mode['length']} / overlap {window_mode['overlap']} frames; "
+                     f"autosplit off (each shot is one sampling run)")
+    if budget is None and raw.get("autoSplit", True) is not False and window_mode is None:
         b = budget_info = AS.token_budget(raw, REF_VIDEO_AUTO_TOKEN_LIMIT)
         budget = b["tokens"]
         notes.append(f"token budget {budget:,} per segment (available {b['avail_gib']} GiB"
                      + (f" after ComfyUI's reserve {b['reserve_gib']} GiB" if b["reserve_gib"] is not None else "")
                      + f", safety {b['safety']})")
-    segments = AS.apply(sys.modules[__name__], segments, media, raw, w, h, rvh_mode, notes, motion=motion,
+    as_raw = dict(raw, autoSplit=False) if window_mode is not None else raw   # window mode: never split a shot
+    segments = AS.apply(sys.modules[__name__], segments, media, as_raw, w, h, rvh_mode, notes, motion=motion,
                         extra_tokens=extra_tokens, budget=budget, sizes=sizes, report=report)
     for seg in segments:
         for key in ("_raw_prompt", "_content"):
             seg.pop(key, None)
         seg["prompt"] = fix_duration_line(seg["prompt"], int(seg["length"]), int(seg["overlapIn"]))
+        for wp in seg.get("windowPrompts") or ():
+            if seg.get("windowPromptsAuto"):   # 3a: each auto window prompt describes one window, not the whole shot
+                wp["prompt"] = fix_duration_line(wp["prompt"], int(window_mode["length"]), 0)
+            else:
+                wp["prompt"] = fix_duration_line(wp["prompt"], int(seg["length"]), int(seg["overlapIn"]))
         if continuity and seg["overlapIn"] > 0:
             seg["prompt"] = continuity_note(seg["overlapIn"]) + "\n\n" + seg["prompt"]
+    if window_mode is not None and window_mode.get("groups", True) and len(segments) > 1:
+        segments = group_window_segments(segments, window_mode, notes, continuity)
     ref_video_height = normalize_ref_video_height(raw.get("refVideoHeight"))
     if ref_video_height is None:
         notes.append(f"refVideoHeight {raw.get('refVideoHeight')!r} unknown -> native")
@@ -659,6 +719,118 @@ def parse_plan(plan_json, width: int = 0, height: int = 0, continuity: bool = Fa
         "tokenBudgetInfo": budget_info,
         "notes": notes,
     }
+    if window_mode is not None:
+        out["windowMode"] = window_mode
+    return out
+
+
+def _strip_continuity(prompt: str, overlap: int) -> str:
+    note = continuity_note(overlap) + "\n\n" if overlap else ""
+    return prompt[len(note):] if note and prompt.startswith(note) else prompt
+
+
+def _shifted(seg: dict, drift: int) -> dict:
+    """3e: a group / shot moved `drift` frames on the output timeline; a locked SONG follows the timeline (offset
+    moved too, so the music stays continuous across groups).  A video lock keeps its offset (sound tied to the
+    video's own frames)."""
+    if not drift:
+        return seg
+    seg = dict(seg, startFrame=seg["startFrame"] + drift)
+    lk = seg.get("locked")
+    if seg.get("audioMode") == "locked" and isinstance(lk, dict) and lk.get("kind") == "audio":
+        seg["locked"] = dict(lk, offset=float(lk["offset"]) + drift / FPS)
+    return seg
+
+
+def _same_audio_clock(first: dict, seg: dict) -> bool:
+    """3e: True when `seg` can share `first`'s group sound track: neither is locked, or both lock the same file and
+    seg's offset is first's plus the time between their starts (the song runs on with the timeline)."""
+    la = first.get("locked") if first.get("audioMode") == "locked" else None
+    lb = seg.get("locked") if seg.get("audioMode") == "locked" else None
+    if la is None and lb is None:
+        return True
+    if la is None or lb is None or (la.get("kind"), la.get("id")) != (lb.get("kind"), lb.get("id")):
+        return False
+    gap = (int(seg["startFrame"]) - int(first["startFrame"])) / FPS
+    return abs(float(la.get("offset") or 0.0) + gap - float(lb.get("offset") or 0.0)) <= 1.5 / FPS
+
+
+def group_window_segments(segments: list, window_mode: dict, notes: list, continuity: bool = True) -> list:
+    """window-exp 3e: the user's normal multi-shot plan -> one continuous timeline per GROUP, sampled in one run.
+    Continued shots (overlapIn > 0) are joined into the timeline (no continuation, no seam); hard cuts (overlapIn 0)
+    become window boundaries inside the group (nothing fused across them).  A group is at most
+    windowMode.groupLength frames (default 1445 = ~60 s): when the next shot would not fit, the group ends at the
+    LAST HARD CUT inside it (a cut changes the picture, so a group boundary there shows no seam).  Only when a
+    continuous run has no hard cut within the limit, the group ends at a shot boundary with the old continuation
+    (a seam) and a note tells the user where to put a hard cut.
+    Each shot keeps its own prompt, pictures, reference videos and audio for its own time range (groupParts)."""
+    limit = int(window_mode.get("groupLength") or 1445)
+    groups, cur = [], [segments[0]]
+    for seg in segments[1:]:
+        if not _same_audio_clock(cur[0], seg):
+            # 11-08 review: a group has ONE timeline sound track (the first shot's lock); a shot whose lock is
+            # another file, another place in it, or no lock where the group has one (or the reverse) starts a group
+            notes.append(f"window mode: shot {seg['index'] + 1} has its own sound track (lock source / offset / mode "
+                         f"differs from shot {cur[0]['index'] + 1}), so a new group starts there"
+                         + ("" if int(seg["overlapIn"]) == 0 else " (it continues the previous shot: a seam there)"))
+            groups.append(cur)
+            cur = [seg]
+            continue
+        cur.append(seg)
+        while len(cur) > 1 and cur[-1]["startFrame"] + cur[-1]["length"] - cur[0]["startFrame"] > limit:
+            cuts = [k for k in range(1, len(cur)) if int(cur[k]["overlapIn"]) == 0]
+            k = cuts[-1] if cuts else len(cur) - 1
+            if not cuts:
+                notes.append(f"window mode: shots {cur[0]['index'] + 1}-{cur[-1]['index'] + 1} are one continuous "
+                             f"take longer than a group ({limit / FPS:.0f} s) - continued with a seam at frame "
+                             f"{cur[-1]['startFrame']}; put a hard cut near there to avoid it")
+            groups.append(cur[:k])
+            cur = cur[k:]
+    groups.append(cur)
+    out, drift = [], 0
+    for gi, parts in enumerate(groups):
+        if len(parts) == 1:
+            out.append(_shifted(parts[0], drift))
+            continue
+        g0 = parts[0]["startFrame"]
+        length = parts[-1]["startFrame"] + parts[-1]["length"] - g0
+        # a hard cut adds a 17n+5 shot, so the timeline may be off the 17n+5 grid: the last shot gets up to 8 frames
+        # longer or shorter, chosen so the shift of the later shots against the song stays within 8 frames
+        r = (length - 5) % 17
+        up, down = (17 - r) % 17, -r
+        pad = up if abs(drift + up) <= abs(drift + down) else down
+        length += pad
+        images = []
+        for p in parts:
+            for im in p["images"]:
+                if im not in images:
+                    images.append(im)
+        gparts = []
+        for j, p in enumerate(parts):
+            ov = int(p["overlapIn"]) if j else 0
+            start, end = p["startFrame"] - g0, p["startFrame"] + p["length"] - g0
+            if j == len(parts) - 1:
+                end = length
+            prompt = _strip_continuity(p["prompt"], int(p["overlapIn"]))
+            gparts.append({"start": start + ov, "end": end, "origin": start, "cut": j > 0 and int(p["overlapIn"]) == 0,
+                           "prompt": fix_duration_line(prompt, end - start - ov, 0),
+                           "images": [images.index(im) for im in p["images"]], "seg": p})
+        g = dict(parts[0])
+        g.update({"length": length, "images": images, "videos": [], "audios": [], "groupParts": gparts,
+                  "windowCuts": sorted({17 * round(gp["origin"] / 17) for gp in gparts if gp["cut"]} |
+                                       {17 * round((gp["origin"] + c) / 17) for gp in gparts
+                                        for c in gp["seg"].get("windowCuts") or () if 0 < c < gp["end"] - gp["origin"]}),
+                  "windowPrompts": [{"start": gp["start"], "end": gp["end"], "prompt": gp["prompt"],
+                                     "images": gp["images"]} for gp in gparts]})
+        g["windowPrompts"][0]["start"] = 0
+        g.pop("windowPromptsAuto", None)
+        out.append(_shifted(g, drift))
+        drift += pad
+        notes.append(f"window mode: shots {parts[0]['index'] + 1}-{parts[-1]['index'] + 1} -> one timeline "
+                     f"({length / FPS:.1f} s, {sum(1 for gp in gparts if gp['cut'])} hard cut(s) inside, "
+                     f"{sum(1 for gp in gparts[1:] if not gp['cut'])} continuation(s) joined without a seam)")
+    for i, seg in enumerate(out):
+        seg["index"] = i
     return out
 
 
@@ -785,10 +957,14 @@ def _input_dir() -> str:
 
 
 def resolve_media_path(file: str) -> str:
+    """Media of a plan: relative to the input folder (may not leave it), or an absolute path inside ComfyUI's
+    input / output / temp folders or a folder listed in the H3MD config file (h3md_paths, v0.3.7)."""
     if os.path.isabs(file) and os.path.isfile(file):
-        return PATHS.check_read(file)   # shared ComfyUI: only inside input/output/temp (h3md_paths)
+        return PATHS.check_read(file)
     base = os.path.abspath(_input_dir())
     candidate = os.path.abspath(os.path.join(base, file))
+    if not os.path.isabs(file) and PATHS.under(base, file) is None:
+        raise PermissionError(f"H3MD: media path '{file}' leaves the input folder")
     if os.path.isfile(candidate):
         return candidate
     raise FileNotFoundError(f"H3MD: media file not found: '{file}' (looked in {base})")
@@ -1167,7 +1343,10 @@ def apply_ref_video_height(plan: dict, seg: dict, result: dict, ref_image_size="
 
 
 def pick_segment_media(plan: dict, index: int, ref_image_size: str = "match", extra_tokens: int = 0) -> dict:
-    seg = get_segment(plan, index)
+    return pick_media_for(plan, get_segment(plan, index), ref_image_size, extra_tokens)
+
+
+def pick_media_for(plan: dict, seg: dict, ref_image_size: str = "match", extra_tokens: int = 0) -> dict:
     media = plan["media"]
     result = {"segment": seg, "images": [], "videos": [], "video_audios": [], "audios": [], "locked_audio": None}
     for image_id in seg["images"]:
@@ -1634,6 +1813,299 @@ class H3MDSegmentPick:
                 json.dumps(seg["labels"], ensure_ascii=False))
 
 
+def window_prompts_for(plan: dict, seg: dict):
+    """window-exp: the segment's window prompts when window mode is on and the shot is longer than one window."""
+    wps = seg.get("windowPrompts") or None
+    wm = plan.get("windowMode")
+    if not wps or not wm:
+        return None
+    # 11-08 review: a short shot with a hard cut keeps all its prompts (the windows break at the cut even when the
+    # shot fits one window); without a cut one window can only take one prompt
+    if (int(seg["length"]) <= int(wm.get("length", 124)) and not seg.get("windowCuts")) or len(wps) < 2:
+        LOG.info("[H3MD Encode] segment %d: window prompts not needed (one window / one prompt) - first prompt used",
+                 seg["index"])
+        return [dict(wps[0], start=0, end=int(seg["length"]))] if wps else None
+    return wps
+
+
+def video_per_window(plan: dict, seg: dict, picked: dict) -> bool:
+    """window-exp 3d: give every window its own slice of the reference videos (re-encoded, time from 0), so a guide
+    video longer than H3's ~15 s reference limit still fits.  windowMode.videoPerWindow: "auto" (default) = when a
+    reference video is longer than that, true / false = always / never."""
+    wm = plan.get("windowMode")
+    if not wm or not picked.get("videos"):
+        return False
+    v = wm.get("videoPerWindow", "auto")
+    if v == "auto":
+        return max(int(f.shape[0]) for f in picked["videos"]) > WIN.MAX_REF_VIDEO and \
+            int(seg["length"]) > int(wm.get("length", 124))
+    return bool(v)
+
+
+def slice_audio(audio, start_s: float, dur_s: float):
+    """ComfyUI AUDIO dict cut to [start_s, start_s + dur_s)."""
+    if audio is None:
+        return None
+    sr = int(audio["sample_rate"])
+    a, n = int(round(start_s * sr)), int(round(dur_s * sr))
+    return {"waveform": audio["waveform"][..., a:a + n], "sample_rate": sr}
+
+
+def _locked_ref_index(seg: dict):
+    """Index (in seg['audios'] / picked['audios']) of the reference audio that is also the shot's locked SONG, or None."""
+    lk = seg.get("locked") if seg.get("audioMode") == "locked" else None
+    if not lk or lk.get("kind") != "audio":
+        return None
+    return next((j for j, aid in enumerate(seg.get("audios") or []) if aid == lk.get("id")), None)
+
+
+def song_per_window(plan: dict, seg: dict, picked: dict) -> bool:
+    """window mode: the locked song is also a reference audio and the shot spans more than one window."""
+    wm = plan.get("windowMode")
+    return bool(wm) and _locked_ref_index(seg) is not None and bool(picked.get("audios")) and \
+        int(seg["length"]) > int(wm.get("length", 124))
+
+
+def window_ref_audios(seg: dict, picked: dict, a: int, b: int, origin: int = 0):
+    """11-08 speed: the reference audio that is the shot's locked song gets only this window's stretch of the song
+    (song time at timeline frame a = lock offset + (a - origin) / 24), like the guide videos - before, every window
+    carried the whole file (a 160 s song made the low-res steps ~38% slower).  Other reference audios (a voice
+    timbre, a sound effect) stay whole.  -> ref_audios dict or None."""
+    j0 = _locked_ref_index(seg)
+    out = {}
+    for j, audio in enumerate(picked.get("audios") or []):
+        if j == j0 and audio is not None:
+            aid = seg["audios"][j]
+            t0 = float(seg["locked"]["offset"]) + (a - origin) / FPS - float((seg.get("audioStarts") or {}).get(aid, 0.0))
+            dur = (b - a) / FPS
+            sr = int(audio["sample_rate"])
+            if t0 < 0:   # song starts inside the window: leading silence
+                part = slice_audio(audio, 0.0, max(0.0, dur + t0))
+                audio = _cat_audio([_silence(audio, int(round(-t0 * FPS))), part])
+            else:
+                audio = slice_audio(audio, t0, dur)
+            if audio is None or int(audio["waveform"].shape[-1]) < sr // 10:
+                # the song has ended before this window: silence keeps the <Audio N> numbering of the prompt
+                audio = _silence(picked["audios"][j], b - a)
+        out[f"ref_audio_{j}"] = audio
+    return out or None
+
+
+def encode_video_windows(core, plan, seg, picked, kwargs, wps, prompt, clip, vae, audio_vae, ref_image_size):
+    """3d: one conditioning per window of BOTH passes (low-res and high-res windows differ), each with the window's
+    own slice of every reference video (and its soundtrack), tagged with the exact window range (RANGE_KEY)."""
+    wm = plan["windowMode"]
+    cuts = tuple(seg.get("windowCuts") or ())
+    ranges = WIN.all_window_ranges(int(seg["length"]), wm, cuts)
+    base = wps or [{"start": 0, "end": int(seg["length"]), "prompt": prompt}]
+    # 接续窗口: a chained low-res window's own span is the part it generates (previous end .. its end), which need
+    # not hold its centre - pick its prompt by its last frame, as the window handler does
+    chained = set(WIN.window_spans(int(seg["length"]), wm["length"], wm["overlap"], cuts)[0]) if wm.get("chain") \
+        else set()
+    positive, latent, texts = [], None, []
+    for a, b in ranges:
+        mid = (b - 1) if (a, b) in chained else (a + b) / 2.0
+        wp = next((w for w in base if w["start"] <= mid < w["end"]), None) or \
+            min(base, key=lambda w: min(abs(mid - w["start"]), abs(mid - w["end"])))
+        kw = dict(kwargs)
+        if wp.get("images") is not None:   # 3c
+            imgs = {f"ref_image_{j}": picked["images"][i] for j, i in enumerate(wp["images"])}
+            kw["ref_images"] = imgs or None
+        vids, auds = {}, {}
+        for k, frames in enumerate(picked["videos"]):
+            sl = frames[a:min(b, int(frames.shape[0]))]
+            if sl.shape[0] < 5:
+                LOG.warning("[H3MD Encode] window %d-%d: reference video %d has no frames here (shorter than the "
+                            "shot) - left out of this window", a, b, k + 1)
+                continue
+            vids[f"ref_video_{k}"] = sl
+            snd = picked["video_audios"][k] if k < len(picked["video_audios"]) else None
+            if snd is not None:
+                auds[f"ref_video_audio_{k}"] = slice_audio(snd, a / FPS, sl.shape[0] / FPS)
+        kw["ref_videos"] = vids or None
+        kw["ref_video_audios"] = auds or None
+        if song_per_window(plan, seg, picked):
+            kw["ref_audios"] = window_ref_audios(seg, picked, a, b)
+        text = fix_duration_line(wp["prompt"], b - a, 0)
+        out = core.MiniMaxH3ReferenceToVideo.execute(
+            clip=clip, prompt=text, width=plan["width"], height=plan["height"], length=seg["length"],
+            ref_image_size=ref_image_size, vae=vae, audio_vae=audio_vae, **kw)
+        pos, lat = _unwrap_node_output(out)[:2]
+        latent = latent or lat
+        tag = {WIN.SPAN_KEY: (wp["start"], wp["end"]), WIN.RANGE_KEY: (a, b)}
+        if cuts:
+            tag[WIN.CUT_KEY] = cuts
+        positive += [[c[0], dict(c[1], **tag)] for c in pos]
+        texts.append(f"[window frames {a}-{b}]\n{text}")
+    LOG.info("[H3MD Encode] segment %d: reference videos per window (3d) - %d window conditionings %s",
+             seg["index"], len(ranges), ranges)
+    return positive, latent, "\n\n".join(texts)
+
+
+def _same_clock_frames(plan, parts, media, k, kk, j, t0, t1, ref_image_size):
+    """3e: timeline frames [t0, t1) of shot k's video j taken from neighbouring shot kk, when kk plays the same video
+    on the same clock (source time at its frame 0 + the shot distance = shot k's) and has those frames.
+    (frames, soundtrack slice or None) or None."""
+    if not 0 <= kk < len(parts) or t1 <= t0:
+        return None
+    cur, nb = parts[k], parts[kk]
+    refs = cur["seg"]["videos"]
+    if j >= len(refs):
+        return None
+    jj = next((i for i, r in enumerate(nb["seg"]["videos"]) if r["id"] == refs[j]["id"]), None)
+    if jj is None:
+        return None
+    t_cur = video_window_origin(refs[j], cur["seg"])
+    t_nb = video_window_origin(nb["seg"]["videos"][jj], nb["seg"])
+    if abs(t_nb + (cur["origin"] - nb["origin"]) / FPS - t_cur) > 1.5 / FPS:
+        return None
+    if kk not in media:
+        media[kk] = pick_media_for(plan, nb["seg"], ref_image_size)
+    nf = media[kk]["videos"][jj]
+    s0, s1 = t0 - nb["origin"], t1 - nb["origin"]
+    if s0 < 0 or s1 > int(nf.shape[0]):
+        return None
+    snd = media[kk]["video_audios"][jj] if jj < len(media[kk]["video_audios"]) else None
+    return nf[s0:s1], (slice_audio(snd, s0 / FPS, (s1 - s0) / FPS) if snd is not None else None)
+
+
+def _silence(like: dict, frames: int) -> dict:
+    sr = int(like["sample_rate"])
+    w = like["waveform"]
+    return {"waveform": w.new_zeros(*w.shape[:-1], int(round(frames / FPS * sr))), "sample_rate": sr}
+
+
+def _cat_audio(parts):
+    parts = [x for x in parts if x is not None]
+    if not parts:
+        return None
+    return {"waveform": torch.cat([x["waveform"] for x in parts], -1), "sample_rate": parts[0]["sample_rate"]}
+
+
+def _window_video(plan, parts, media, k, j, frames, snd, a, b, ref_image_size):
+    """3e: shot k's video j for window [a, b) of the timeline, on the timeline's clock (frame i of the result = output
+    frame a + i).  Frames before / after shot k's own video come from the neighbouring shot when it plays the same
+    video on the same clock (a motion-copy guide split into continued shots, 11-08); otherwise the first frame is held
+    before the shot start (as load_video_window does) and the slice ends where the video ends.  -> (frames, audio, note)"""
+    origin, n = parts[k]["origin"], int(frames.shape[0])
+    s0, s1 = max(a, origin), min(b, origin + n)
+    if s1 <= s0:
+        return frames[:0], None, ""
+    sl, aud, note = [frames[s0 - origin:s1 - origin]], [slice_audio(snd, (s0 - origin) / FPS, (s1 - s0) / FPS)
+                                                       if snd is not None else None], []
+    if a < s0:
+        lead = _same_clock_frames(plan, parts, media, k, k - 1, j, a, s0, ref_image_size)
+        if lead is not None and tuple(lead[0].shape[1:]) == tuple(sl[0].shape[1:]):
+            sl.insert(0, lead[0])
+            aud.insert(0, (lead[1] if lead[1] is not None else _silence(snd, s0 - a)) if snd is not None else None)
+            note.append(f"first {s0 - a} frames from shot {k}")
+        else:
+            sl.insert(0, sl[0][:1].expand(s0 - a, *sl[0].shape[1:]))
+            if snd is not None:
+                aud.insert(0, _silence(snd, s0 - a))
+            note.append(f"first frame held for {s0 - a} frames")
+    if s1 < b:
+        trail = _same_clock_frames(plan, parts, media, k, k + 1, j, s1, b, ref_image_size)
+        if trail is not None and tuple(trail[0].shape[1:]) == tuple(sl[-1].shape[1:]):
+            sl.append(trail[0])
+            aud.append((trail[1] if trail[1] is not None else _silence(snd, b - s1)) if snd is not None else None)
+            note.append(f"last {b - s1} frames from shot {k + 2}")
+        elif n >= int(parts[k]["seg"]["length"]) - 1:
+            # a timeline video that covers its whole shot (a guide) and the window runs on into a shot without it:
+            # hold the last frame, so the guide keeps the window's length (a native-temporal guide must match it)
+            sl.append(sl[-1][-1:].expand(b - s1, *sl[-1].shape[1:]))
+            if snd is not None:
+                aud.append(_silence(snd, b - s1))
+            note.append(f"last frame held for {b - s1} frames")
+    out = sl[0] if len(sl) == 1 else torch.cat(sl, 0)
+    audio = _cat_audio(aud) if snd is not None else None
+    m = 5 + 17 * ((int(out.shape[0]) - 5) // 17) if out.shape[0] >= 5 else int(out.shape[0])
+    if m < out.shape[0]:   # core keeps 17n+5 frames of a reference video; its soundtrack must end with it
+        out = out[:m]
+        if audio is not None:
+            audio = slice_audio(audio, 0.0, m / FPS)
+    return out, audio, ", ".join(note)
+
+
+def encode_group_windows(core, plan, seg, picked, clip, vae, audio_vae, ref_image_size):
+    """3e: one conditioning per window of both passes; the window belongs to the shot (group part) holding its
+    centre and gets THAT shot's prompt, pictures, reference audio and the matching slice of its reference videos
+    (re-encoded from the window start, 3d).  Tagged with the exact window range (RANGE_KEY) and the hard cuts."""
+    wm = plan["windowMode"]
+    cuts = tuple(seg.get("windowCuts") or ())
+    ranges = WIN.all_window_ranges(int(seg["length"]), wm, cuts)
+    parts = seg["groupParts"]
+    # shot ranges with the hard cuts where the windows really break (snapped to 17 frames)
+    eff = []
+    for i, gp in enumerate(parts):
+        st = 17 * round(gp["origin"] / 17) if gp.get("cut") else gp["start"]
+        eff.append([st, gp["end"]])
+        if i and gp.get("cut"):
+            eff[i - 1][1] = st
+    media = {}
+    spans = WIN.window_span_map(int(seg["length"]), wm, cuts)
+    positive, latent, texts, timed = [], None, [], 0
+    for a, b in ranges:
+        mid = (a + b) / 2.0
+        k = next((i for i, gp in enumerate(parts) if gp["start"] <= mid < gp["end"]), len(parts) - 1)
+        gp = parts[k]
+        if k not in media:
+            media[k] = pick_media_for(plan, gp["seg"], ref_image_size)
+        pm = media[k]
+        kw = build_core_kwargs(pm)
+        # the shots this window covers (a window never crosses a hard cut, so these are continued shots)
+        cover = [i for i, p in enumerate(parts) if eff[i][0] < b and eff[i][1] > a]
+        same_pics = all(list(parts[i]["seg"]["images"]) == list(gp["seg"]["images"]) for i in cover)
+        # 11-08: each shot's time marks ('[12s]' / 'At 00:12.7') resolved for THIS window: a line or action goes to
+        # the one window whose own span holds it, timed inside the window (before: every window of a long shot got
+        # all of the shot's lines with the shot's own times)
+        lo, hi = spans.get((a, b), (a, b))
+        own = {}
+        for i in set(cover) | {k}:
+            own[i], ev = WIN.timed_window_prompt(parts[i]["prompt"], a, b, lo, hi, parts[i]["origin"])
+            timed += ev is not None
+        combined = None
+        if len(cover) > 1 and same_pics:
+            combined = WIN.combine_part_prompts([((parts[i]["start"] - a) / FPS, own[i]) for i in cover])
+        elif len(cover) > 1:
+            LOG.warning("[H3MD Encode] window %d-%d covers shots %s with different pictures - prompt of shot %d only",
+                        a, b, [i + 1 for i in cover], k + 1)
+        vids, auds = {}, {}
+        for j, frames in enumerate(pm["videos"]):
+            snd = pm["video_audios"][j] if j < len(pm["video_audios"]) else None
+            sl, sa, note = _window_video(plan, parts, media, k, j, frames, snd, a, b, ref_image_size)
+            if note:
+                LOG.info("[H3MD Encode] window %d-%d, shot %d video %d: %s", a, b, k + 1, j + 1, note)
+            if sl.shape[0] < 5:
+                continue
+            vids[f"ref_video_{j}"] = sl
+            if sa is not None:
+                auds[f"ref_video_audio_{j}"] = sa
+        kw["ref_videos"] = vids or None
+        kw["ref_video_audios"] = auds or None
+        if _locked_ref_index(gp["seg"]) is not None:
+            # the group's own sound-track clock (its lock follows the timeline, including the <= 8-frame drift of
+            # later groups); the grouping already made sure every shot of the group is on that clock
+            lk_seg = dict(gp["seg"], locked=seg["locked"]) if seg.get("audioMode") == "locked" and seg.get("locked") \
+                else gp["seg"]
+            kw["ref_audios"] = window_ref_audios(lk_seg, pm, a, b, 0 if lk_seg is not gp["seg"] else gp["origin"])
+        text = fix_duration_line(combined or own[k], b - a, 0)
+        out = core.MiniMaxH3ReferenceToVideo.execute(
+            clip=clip, prompt=text, width=plan["width"], height=plan["height"], length=seg["length"],
+            ref_image_size=ref_image_size, vae=vae, audio_vae=audio_vae, **kw)
+        pos, lat = _unwrap_node_output(out)[:2]
+        latent = latent or lat
+        tag = {WIN.SPAN_KEY: (gp["start"], gp["end"]), WIN.RANGE_KEY: (a, b)}
+        if cuts:
+            tag[WIN.CUT_KEY] = cuts
+        positive += [[c[0], dict(c[1], **tag)] for c in pos]
+        texts.append(f"[window frames {a}-{b}: shot(s) {[i + 1 for i in cover]}]\n{text}")
+    LOG.info("[H3MD Encode] segment %d: %d shots on one timeline (3e), %d window conditionings %s, cuts %s%s",
+             seg["index"], len(parts), len(ranges), ranges, list(cuts),
+             ", time marks resolved per window" if timed else "")
+    return positive, latent, "\n\n".join(texts)
+
+
 class H3MDSegmentEncode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -1663,10 +2135,38 @@ class H3MDSegmentEncode:
         prompt = (prompt_override or "").strip() or seg["prompt"]
         core = _core_h3()
         kwargs = build_core_kwargs(picked)
-        out = core.MiniMaxH3ReferenceToVideo.execute(
-            clip=clip, prompt=prompt, width=plan["width"], height=plan["height"], length=seg["length"],
-            ref_image_size=ref_image_size, vae=vae, audio_vae=audio_vae, **kwargs)
-        positive, latent = _unwrap_node_output(out)[:2]
+        wps = window_prompts_for(plan, seg) if not (prompt_override or "").strip() else None
+        if seg.get("groupParts") and not (prompt_override or "").strip():
+            positive, latent, prompt = encode_group_windows(core, plan, seg, picked, clip, vae, audio_vae,
+                                                            ref_image_size)
+        elif video_per_window(plan, seg, picked) or song_per_window(plan, seg, picked):
+            positive, latent, prompt = encode_video_windows(core, plan, seg, picked, kwargs, wps, prompt, clip, vae,
+                                                            audio_vae, ref_image_size)
+        elif wps:
+            # window-exp: one conditioning per window prompt, tagged with its frame span (h3md_window picks per window)
+            positive, latent = [], None
+            for wp in wps:
+                kw = kwargs
+                if wp.get("images") is not None:   # 3c: only the pictures this window names
+                    imgs = {f"ref_image_{j}": picked["images"][i] for j, i in enumerate(wp["images"])}
+                    kw = dict(kwargs, ref_images=imgs or None)
+                out = core.MiniMaxH3ReferenceToVideo.execute(
+                    clip=clip, prompt=wp["prompt"], width=plan["width"], height=plan["height"], length=seg["length"],
+                    ref_image_size=ref_image_size, vae=vae, audio_vae=audio_vae, **kw)
+                pos, lat = _unwrap_node_output(out)[:2]
+                latent = latent or lat
+                tag = {WIN.SPAN_KEY: (wp["start"], wp["end"])}
+                if seg.get("windowCuts"):
+                    tag[WIN.CUT_KEY] = tuple(seg["windowCuts"])
+                positive += [[c[0], dict(c[1], **tag)] for c in pos]
+            prompt = "\n\n".join(f"[frames {wp['start']}-{wp['end']}]\n{wp['prompt']}" for wp in wps)
+            LOG.info("[H3MD Encode] segment %d: %d window prompts %s", seg["index"], len(wps),
+                     [(wp["start"], wp["end"]) for wp in wps])
+        else:
+            out = core.MiniMaxH3ReferenceToVideo.execute(
+                clip=clip, prompt=prompt, width=plan["width"], height=plan["height"], length=seg["length"],
+                ref_image_size=ref_image_size, vae=vae, audio_vae=audio_vae, **kwargs)
+            positive, latent = _unwrap_node_output(out)[:2]
         latent = {"samples": latent["samples"]}
         negative = zero_out_conditioning(positive)
         labels = json.dumps(seg["labels"], ensure_ascii=False)

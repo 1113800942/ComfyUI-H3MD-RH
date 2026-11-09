@@ -19,6 +19,7 @@ CORE = [
     "h3md_lora.py", "h3md_lowres_anchor.py", "h3md_paths.py", "h3md_refwindow.py", "h3md_sampler.py",
     "h3md_seam.py", "h3md_semantic_bridge.py", "h3md_stream_save.py", "h3md_tiled_hires.py", "h3md_vram.py",
     "h3md_control_panel.py", "h3md_video_preview.py",
+    "h3md_window.py", "h3md_progress.py",          # 0.4: CCW window mode + per-step progress cache
 ]
 CORE_DIRS = ["h3md_luna"]
 # import-time route registration -> disabled in the RH build

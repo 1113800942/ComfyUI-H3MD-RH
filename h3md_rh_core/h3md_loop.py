@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 import torch
 
@@ -45,6 +46,8 @@ try:
     from . import h3md_stream_save as SS          # H3MD stream save ('long video' output)
     from . import h3md_depth_control as DC        # H3MD depth ControlNet (optional input depth_control)
     from . import h3md_lowres_anchor as LA        # H3MD low-res anchor (2026-10-30)
+    from . import h3md_window as WIN              # window-exp branch (2026-11-07)
+    from . import h3md_progress as PROG           # window-exp: per-step progress cache
 except ImportError:  # flat import (tests)
     import h3md_director as D
     import h3md_sampler as S
@@ -56,6 +59,8 @@ except ImportError:  # flat import (tests)
     import h3md_stream_save as SS
     import h3md_depth_control as DC
     import h3md_lowres_anchor as LA
+    import h3md_window as WIN
+    import h3md_progress as PROG
 
 LOG = logging.getLogger("H3MD")
 _TAG = "[H3MD Loop]"
@@ -124,6 +129,106 @@ def decode_video_seam_context(vae, video: torch.Tensor, prev: dict | None, trim:
     LOG.info("%s %s: seam_decode_context %d clip(s) (%d frames) of the previous latent decoded before the seam, "
              "dropped again", _TAG, where, c, drop)
     return imgs[drop:]
+
+
+# --- window-exp (11-07): chunked decode of a long window-mode group ---
+# A group (up to ~60 s) decoded in one piece needed ~3x its frames in RAM (68 GB for 60 s at 1088x1664).  Here the
+# latent is decoded a few clips at a time, straight into the disk cache: each chunk starts CLIP-aligned with
+# DECODE_CTX_CLIPS clips of the latent right before it as VAE warm-up (dropped again, as seam_decode_context does) and
+# ends 2 latents into the next clip (a valid 5n+2 stream), whose 5 frames are dropped again.  RAM ~ one chunk.
+DECODE_CHUNK_CLIPS = 14   # ~238 frames (~10 s) per chunk
+DECODE_CTX_CLIPS = 2
+
+
+class ChunkedFrames:
+    """[N,H,W,3] frames of a [1,C,5n+2,h,w] video latent, decoded chunk by chunk on access (slices only).  Behaves
+    like the decoded tensor for h3md_cache.SegmentCache.write and for tail slices."""
+
+    def __init__(self, vae, video: torch.Tensor, chunk_clips: int = DECODE_CHUNK_CLIPS, ctx: int = DECODE_CTX_CLIPS,
+                 decode=None, reuse=None):
+        if video.ndim != 5 or video.shape[0] != 1 or (int(video.shape[2]) - 2) % CLIP_TOKENS:
+            raise ValueError(f"not a 5n+2 video latent: {tuple(video.shape)}")
+        self.vae, self.video, self.ctx = vae, video, int(ctx)
+        self.decode = decode or decode_video
+        self.n_clips = (int(video.shape[2]) - 2) // CLIP_TOKENS
+        self.chunk = max(1, int(chunk_clips))
+        self.n = self.n_clips * CLIP_FRAMES + 5
+        self._cur = None    # (first frame, frames)
+        self._hw = None
+        # local redraw: (old frames .npy of the same latent, (first, end) changed latents): a chunk whose latents
+        # (warm-up included) are all unchanged is copied from the old frames instead of decoded (identical result)
+        self._reuse, self._old = reuse, None
+        self.reused = self.decoded = 0
+
+    def _old_frames(self, j0: int, want: int):
+        if self._old is None:
+            import numpy as np
+            try:
+                self._old = np.load(self._reuse[0], mmap_mode="r")
+                if self._old.ndim != 4 or self._old.shape[0] != self.n:
+                    self._old = False
+            except Exception:
+                self._old = False
+        if self._old is False:
+            return None
+        import numpy as np
+        part = np.asarray(self._old[CLIP_FRAMES * j0:CLIP_FRAMES * j0 + want])
+        fr = torch.from_numpy(part.astype(np.float32))
+        return fr / 255.0 if part.dtype == np.uint8 else fr
+
+    def _decode_chunk(self, j0: int):
+        j1 = min(self.n_clips, j0 + self.chunk)
+        c = min(self.ctx, j0)
+        last = j1 == self.n_clips
+        if self._reuse is not None:
+            l0, l1 = self._reuse[1]
+            if l1 <= CLIP_TOKENS * (j0 - c) or l0 >= CLIP_TOKENS * j1 + 2:
+                old = self._old_frames(j0, CLIP_FRAMES * (j1 - j0) + (5 if last else 0))
+                if old is not None:
+                    self.reused += 1
+                    self._cur = (CLIP_FRAMES * j0, old)
+                    return self._cur
+        self.decoded += 1
+        lat = self.video[:, :, CLIP_TOKENS * (j0 - c):CLIP_TOKENS * j1 + 2]
+        imgs = self.decode(self.vae, lat)
+        want = CLIP_FRAMES * (j1 - j0) + (5 if last else 0)
+        if imgs.shape[0] != CLIP_FRAMES * (j1 - j0 + c) + 5:
+            raise RuntimeError(f"chunk decode gave {imgs.shape[0]} frames, expected {CLIP_FRAMES * (j1 - j0 + c) + 5}")
+        out = imgs[CLIP_FRAMES * c:CLIP_FRAMES * c + want].to("cpu")
+        del imgs
+        self._cur = (CLIP_FRAMES * j0, out)
+        return self._cur
+
+    def _frames(self, a: int, b: int):
+        parts = []
+        while a < b:
+            if self._cur is None or not (self._cur[0] <= a < self._cur[0] + self._cur[1].shape[0]):
+                self._decode_chunk(min(a // CLIP_FRAMES, self.n_clips - 1) // self.chunk * self.chunk)
+            f0, fr = self._cur
+            e = min(b, f0 + fr.shape[0])
+            parts.append(fr[a - f0:e - f0])
+            a = e
+        return parts[0] if len(parts) == 1 else torch.cat(parts, 0)
+
+    @property
+    def shape(self):
+        if self._hw is None:
+            self._hw = tuple(self._frames(0, 1).shape[1:])
+        return (self.n,) + self._hw
+
+    def __getitem__(self, idx):
+        if not isinstance(idx, slice):
+            raise TypeError("ChunkedFrames supports slices only")
+        a, b, step = idx.indices(self.n)
+        if step != 1:
+            raise TypeError("ChunkedFrames supports step-1 slices only")
+        return self._frames(a, b) if b > a else self._frames(0, 1)[:0]
+
+
+def chunked_decode_ok(video: torch.Tensor, window_mode) -> bool:
+    """Chunked decode for window-mode segments longer than one chunk."""
+    return bool(window_mode) and video.ndim == 5 and (int(video.shape[2]) - 2) % CLIP_TOKENS == 0 and \
+        (int(video.shape[2]) - 2) // CLIP_TOKENS > DECODE_CHUNK_CLIPS
 
 
 def encode_video(vae, frames: torch.Tensor) -> torch.Tensor:
@@ -466,6 +571,83 @@ def _to_cpu(latent: dict) -> dict:
 # node
 # ---------------------------------------------------------------------------
 
+def check_redraw_base(cache, k, man: dict, seg: dict, where=""):
+    """Local redraw needs this segment finished in the cache with the same length and hard cuts (0.4.0: the
+    prompt, pictures and reference media may differ - only the redrawn seconds use the new ones).  The frame size is
+    checked by redraw_latent."""
+    if not man.get("key") or not cache.has(k, man["key"]):
+        raise ValueError(f"{_TAG} {where}: local redraw needs this segment finished in the cache (run it once without "
+                         f"'redraw', with resume_from_cache on); cache {cache.dir}. 局部重绘需要先把这一段完整跑过一次"
+                         f"（打开 resume_from_cache），缓存里没有。")
+    if int(man.get("frames", -1)) != int(seg["length"]):
+        raise ValueError(f"{_TAG} {where}: local redraw: the segment is {seg['length']} frames now, the cached one "
+                         f"{man.get('frames')} - redraw can not change lengths; run the segment again instead. "
+                         f"局部重绘不能改长度（现在 {seg['length']} 帧，缓存里 {man.get('frames')} 帧），请整段重跑。")
+    now = [int(c) for c in seg.get("windowCuts") or []]
+    if "cuts" in man and [int(c) for c in man.get("cuts") or []] != now:
+        raise ValueError(f"{_TAG} {where}: local redraw: the hard cuts moved (cached {man.get('cuts')}, now {now}) - "
+                         f"redraw can not move cuts; run the segment again instead. 局部重绘不能移动硬切位置"
+                         f"（缓存里 {man.get('cuts')}，现在 {now}），请整段重跑。")
+
+
+def redraw_latent(cache, k, latent: dict, ranges, where=""):
+    """window-exp local redraw: the segment's cached final latent with a soft noise mask over `ranges` (frames inside
+    the segment; 1 = redraw, 0 = keep).  A locked song (audio mask already 0 in `latent`) stays locked.  Returns
+    (latent, active latent range, fresh seed)."""
+    import random
+    old_v, old_a = D._streams(cache.load_latent(k), "cached latent")
+    cur_v, cur_a = D._streams({"samples": latent["samples"]}, "latent")
+    if tuple(old_v.shape[2:]) != tuple(cur_v.shape[2:]) or old_a.shape[-1] != cur_a.shape[-1]:
+        raise ValueError(f"{_TAG} {where}: the cached segment {tuple(old_v.shape)} does not match the plan "
+                         f"{tuple(cur_v.shape)} - local redraw needs the same length and size")
+    vm, am, active = WIN.redraw_masks(int(old_v.shape[2]), int(old_a.shape[-1]), ranges)
+    nm = latent.get("noise_mask")
+    a_keep = None
+    if nm is not None:   # e.g. locked audio from the Continue step
+        _vm0, am0 = nm.unbind() if hasattr(nm, "unbind") else nm
+        a_keep = am0
+    video = old_v.to(cur_v)
+    audio = old_a.to(cur_a)
+    video_mask = vm.view(1, 1, -1, 1, 1).to(device=cur_v.device, dtype=torch.float32)
+    audio_mask = am.view(1, 1, 1, -1).to(device=cur_a.device, dtype=torch.float32)
+    if a_keep is not None:
+        audio = torch.where(a_keep.to(audio.device) == 0, cur_a, audio)
+        audio_mask = torch.minimum(audio_mask, a_keep.to(audio_mask))
+    seed = random.SystemRandom().randrange(1, 2 ** 50)
+    LOG.info("%s %s: LOCAL REDRAW of frames %s (latents %d-%d, ramp %d), new seed %d; the rest of the cached segment "
+             "is kept", _TAG, where, ranges, active[0], active[1] - 1, WIN.REDRAW_RAMP, seed)
+    return {"samples": D._nested((video, audio)), "noise_mask": D._nested((video_mask, audio_mask))}, active, seed
+
+
+def low_pass_key(settings_hash, plan, k, key_seed, seg_seed, continued, prev_key, dkey, lora_sig):
+    """11-08: key of what the LOW-RES pass depends on: the segment key without the high-res windows and without the
+    high-res LoRAs (so changing only those keeps the low-res result, pass1.pt).  Window-mode plans only."""
+    wm = plan.get("windowMode") if isinstance(plan, dict) else None
+    if not wm:
+        return None
+    plan_low = dict(plan, windowMode={x: v for x, v in wm.items() if x not in ("highLength", "highOverlap")})
+    low = C.segment_key(settings_hash, plan_low, k, key_seed, continued, prev_key)
+    if dkey is not None:
+        low = C._sha({"key": low, "depth_control": dkey})
+    if (lora_sig or {}).get("low"):
+        low = C._sha({"key": low, "loras": {"low": lora_sig["low"]}})
+    if seg_seed != key_seed:
+        low = C._sha({"key": low, "seed": seg_seed})
+    return low
+
+
+def progress_store(cache, k, key, plan, where="", low_key=None):
+    """window-exp: the segment's progress cache (low-res result + per-step state) in the segment cache folder, or None
+    (no disk cache, no key, or not a window-mode plan)."""
+    if cache is None or not key or not isinstance(plan, dict) or not plan.get("windowMode"):
+        return None
+    try:
+        return PROG.ProgressStore(os.path.join(cache.dir, f"seg_{int(k):03d}_progress"), key, low_key=low_key)
+    except Exception as exc:
+        LOG.warning("%s %s: progress cache unavailable (%s)", _TAG, where, exc)
+        return None
+
+
 class H3MDLoopSampler:
     @classmethod
     def INPUT_TYPES(cls):
@@ -523,7 +705,7 @@ class H3MDLoopSampler:
             "cache_dtype": (["fp16", "uint8"], {"default": "fp16",
                             "tooltip": "Cached frame format. fp16 ~= lossless (2 B/value); uint8 = half the disk, "
                                        "8-bit like the saved video."}),
-            "cache_dir": ("STRING", {"default": "", "tooltip": "Empty = auto: <drive>/H3MD_cache on the local fixed drive with the most free space (an existing H3MD_cache holding resume_* runs is reused first, so resume survives restarts). Falls back to ComfyUI temp/h3md_cache with a warning if nothing is writable."}),
+            "cache_dir": ("STRING", {"default": "", "tooltip": "Empty = auto: <drive>/H3MD_cache on the local fixed drive with the most free space (an existing H3MD_cache holding resume_* runs is reused first, so resume survives restarts). Falls back to ComfyUI temp/h3md_cache with a warning if nothing is writable. A set folder must be inside a <drive>/H3MD_cache folder, ComfyUI's output / temp folder or a folder listed under \"folders\" in <ComfyUI user folder>/h3md/config.json (v0.3.7); otherwise the automatic folder is used."}),
             "delete_cache": ("BOOLEAN", {"default": True,  # hidden in the UI (web/js/h3md_hide_widgets.js); slot kept
                              "tooltip": "Hidden / no effect since 2026-10-18: the Loop never deletes its cache before the "
                                         "video is saved. Use H3MD Save Video Interp -> delete_cache_after_save."}),
@@ -606,6 +788,8 @@ class H3MDLoopSampler:
         for gone in ("start_index", "end_index", "previous_latent"):  # removed 2026-10-30 (API-format prompts)
             if sampler_kwargs.pop(gone, None) is not None:
                 LOG.warning("%s '%s' was removed: use rerun_segments / stop_after", _TAG, gone)
+        if isinstance(plan, dict) and plan.get("windowMode"):   # window-exp: core context windows + H3MD additions
+            low_res_model, high_res_model = WIN.wrap_models(plan["windowMode"], low_res_model, high_res_model)
         run_text = str(sampler_kwargs.pop("segments_to_run", "") or "").strip()   # v0.3 Control Panel box
         if run_text:
             parse_segments(run_text, len(plan["segments"]))   # wrong writing -> error before anything runs
@@ -788,6 +972,7 @@ class H3MDLoopSampler:
                 import random
                 seg_seed = random.SystemRandom().randrange(1, 2 ** 50)
             will_continue = seg["overlapIn"] > 0 and prev is not None
+            preview = bool(isinstance(plan, dict) and (plan.get("windowMode") or {}).get("preview"))
             uses_cont = C.segment_uses_cont_settings(seg, will_continue, highres_tiling)
             key = C.segment_key(settings_hash["full" if uses_cont else "base"], plan, k, key_seed, will_continue,
                                 prev_key) if cache is not None else None
@@ -796,12 +981,49 @@ class H3MDLoopSampler:
                 key = C._sha({"key": key, "depth_control": dkey})
             if key is not None and lora_sig:   # 0.3.4: LoRAs recorded by H3MD loaders / the Control Panel
                 key = C._sha({"key": key, "loras": lora_sig})
+            # window-exp low-res preview: its own segment-cache key (never mistaken for a finished segment); the
+            # progress cache keeps the full run's key, so the full run reuses the preview's low-res pass (pass1.pt)
+            pkey = key
+            if key is not None and seg_seed != key_seed:
+                # 11-08 review: a rerun with a new seed must not reuse the old take's low-res pass (pass1.pt)
+                pkey = C._sha({"key": key, "seed": seg_seed})
+            low_key = low_pass_key(settings_hash["full" if uses_cont else "base"], plan, k, key_seed, seg_seed,
+                                   will_continue, prev_key, dkey, lora_sig) if key is not None else None
+            if key is not None and preview:
+                key = C._sha({"key": key, "preview": True})
+            # window-exp local redraw: windowMode.redraw [[start_s, end_s], ...] re-renders only those seconds of the
+            # cached segment.  0.4.0: the prompt, the pictures and the reference media may have changed since the
+            # segment was rendered (only the redrawn seconds use the new ones); length, size and hard cuts may not.
+            redraw = WIN.redraw_ranges(plan.get("windowMode") if isinstance(plan, dict) else None,
+                                       int(seg["startFrame"]), int(seg["length"]))
+            base_key = key
+            if redraw and cache is not None and key is not None:
+                man = cache.manifest(k) or {}
+                check_redraw_base(cache, k, man, seg, where)
+                if base_key not in (man.get("key"), man.get("base_key")):
+                    LOG.info("%s %s: local redraw: the prompt / pictures / reference media of this segment changed since "
+                             "it was rendered - the redrawn seconds %s use the new ones, the rest keeps the cached take. "
+                             "局部重绘：这一段的提示词 / 参考素材改过，只有重画的秒数用新的，其余保持原样。", _TAG, where,
+                             redraw)
+                key = C._sha({"key": base_key, "redraw": redraw})
+            elif redraw:
+                raise ValueError(f"{_TAG} {where}: local redraw needs the disk cache (cache_mode=disk)")
+            if not redraw and cache is not None and key is not None:
+                # a segment redrawn earlier keeps its latest version: also once 'redraw' is cleared or the Redraw /
+                # Preview node is bypassed (0.4.0 fix: before, clearing 'redraw' re-rendered the original take
+                # over the redrawn one)
+                man = cache.manifest(k) or {}
+                if man.get("base_key") == key and man.get("key"):
+                    key = man["key"]
             if rerun:  # H3MD rerun: not selected = cached (validated above), selected = re-rendered
                 hit = k not in rerun
-                if hit and not cache.has(k, key):
-                    cache.adopt(k, key)   # new chain key, so a later normal resume reuses it too
+                if hit and not cache.has(k, key) and not preview:
+                    # new chain key, so a later normal resume reuses it too (not with the preview key: that would
+                    # relabel a finished full-quality segment as a preview and the next full run would redo it)
+                    cache.adopt(k, key)
             else:
-                hit = cache is not None and resume and cache.has(k, key)
+                hit = cache is not None and (resume or bool((plan.get("windowMode") or {}).get("redraw"))) \
+                    and not redraw and cache.has(k, key)
             if hit and not rerun and beta and step + 1 < len(indices) and segs[indices[step + 1]]["overlapIn"] > 0 \
                     and not (cache.manifest(k) or {}).get("lowres"):
                 LOG.info("%s %s: cached segment has no BETA low-res carry (written in another mode); re-rendering",
@@ -909,6 +1131,21 @@ class H3MDLoopSampler:
                     LOG.warning("%s %s: lowres_anchor has no reference (the shot's first segment has no low-res "
                                 "result in the cache); not applied", _TAG, where)
             low_model, high_model, dctl = model, high_res_model, None
+            progress = None if redraw else progress_store(cache, k, pkey, plan, where, low_key)
+            if progress is not None:
+                extra["h3md_progress"] = progress
+            if redraw:   # local redraw: the cached segment is the starting point, only the ranges are re-rendered
+                latent, active, seg_seed = redraw_latent(cache, k, latent, redraw, where)
+                WIN.set_active([low_res_model, high_res_model], active)
+                old_low = cache.load_lowres(k)   # 0.4.0: the kept rows of the low-res pass = its own result
+                if isinstance(old_low, torch.Tensor):
+                    extra["h3md_low_res_base"] = old_low
+                else:
+                    LOG.warning("%s %s: local redraw: no low-res result of this segment in the cache (written without "
+                                "the Beta low-res carry); the low-res pass uses the downscaled final picture around "
+                                "the redrawn seconds", _TAG, where)
+            if preview:
+                extra["h3md_low_only"] = True
             nxt_ov = segs[indices[step + 1]]["overlapIn"] if step + 1 < len(indices) else 0
             try:
                 if dseg is not None:  # H3MD depth: int8 patch loaded now, on a CLONE of the low-res model only
@@ -924,6 +1161,8 @@ class H3MDLoopSampler:
                                           high_res_model=high_model, highres_tiling=tiling, unique_id=unique_id,
                                           **extra, **sampler_kwargs)
             finally:
+                if redraw:
+                    WIN.set_active([low_res_model, high_res_model], None)
                 if dseg is not None:
                     depth.finish(dseg, dctl, nxt_ov)
                 else:
@@ -931,6 +1170,8 @@ class H3MDLoopSampler:
                 del low_model, dctl
             out = res["result"][0] if isinstance(res, dict) else res[0]
             final = _to_cpu(out)  # only 'samples' ever leaves the sampler; this is the handoff
+            if progress is not None:
+                progress.finish()
             if hires_strength > 0:  # H3MD hi-res anchor (v0.2.0)
                 final, hires_ref, hinfo = hires_anchor_step(final, hires_ref, continued, overlap, hires_strength, where,
                                                           tail_ov if tail_lat is not None else 0)
@@ -964,13 +1205,46 @@ class H3MDLoopSampler:
             report[-1]["steps"] = step_summary(getattr(sampler_node, "last_steps", None))
             prev, prev_key, prev_tail = final, key, None
             prev_low = getattr(sampler_node, "last_lowres", None) if beta else None
+            if redraw and isinstance(prev_low, torch.Tensor) and cache is not None:
+                # local redraw: the low-res pass started from the DOWNSCALED final picture; outside the redrawn
+                # seconds keep the segment's own native low-res result (the continuation carry / anchor source)
+                try:
+                    old_low = cache.load_lowres(k)
+                    if isinstance(old_low, torch.Tensor) and old_low.shape == prev_low.shape:
+                        vm, _am, _act = WIN.redraw_masks(int(prev_low.shape[2]), 1, redraw)
+                        keep = (vm == 0).view(1, 1, -1, 1, 1)
+                        prev_low = torch.where(keep, old_low.to(prev_low), prev_low)
+                except Exception as exc:
+                    LOG.warning("%s %s: local redraw: old low-res result not kept (%s)", _TAG, where, exc)
             if anchor_strength > 0 and not continued:  # H3MD low-res anchor: a shot's first segment is the reference
                 anchor_ref = LA.stats(prev_low) if isinstance(prev_low, torch.Tensor) else None
             if beta and prev_low is not None:
                 report[-1]["lowres_carry"] = list(prev_low.shape)
             if cache is not None:  # decode now, write to disk, free RAM
                 v, a = final["samples"].unbind()
-                imgs = decode_video_seam_context(vae, v, ctx_prevs[-1], trims[-1], ctx_clips, where)  # H3MD-Exp
+                redraw_arc = None
+                if chunked_decode_ok(v, isinstance(plan, dict) and plan.get("windowMode")) and not self._seam.active:
+                    reuse = None
+                    if redraw:   # local redraw: unchanged chunks are copied from the previous version's frames
+                        try:
+                            old_v = D._streams(cache.load_latent(k), "cached latent")[0]
+                            if tuple(old_v.shape) == tuple(v.shape):
+                                ch = torch.nonzero((v.float() - old_v.float()).abs().flatten(3)
+                                                   .amax(dim=3).amax(dim=(0, 1)) > 0).flatten()
+                                changed = (int(ch[0]), int(ch[-1]) + 1) if ch.numel() else (0, 0)
+                                redraw_arc = cache.archive_dir()
+                                cache.archive(k, redraw_arc)
+                                reuse = (os.path.join(redraw_arc, os.path.basename(cache._p(k, "_frames.npy"))),
+                                         changed)
+                            del old_v
+                        except Exception as exc:
+                            LOG.warning("%s %s: local redraw: decoding everything (%s)", _TAG, where, exc)
+                    imgs = ChunkedFrames(vae, v, reuse=reuse)   # window-exp: decoded chunk by chunk while written
+                    LOG.info("%s %s: chunked decode (%d frames, %d-clip chunks)%s", _TAG, where, imgs.n,
+                             DECODE_CHUNK_CLIPS, f", unchanged latents outside {reuse[1]} copied from the previous "
+                             f"version" if reuse else "")
+                else:
+                    imgs = decode_video_seam_context(vae, v, ctx_prevs[-1], trims[-1], ctx_clips, where)  # H3MD-Exp
                 ctx_prevs[-1] = None
                 nxt = segs[indices[step + 1]]["overlapIn"] if step + 1 < len(indices) else 0
                 if nxt > 0 and lowres_prefix_mode in ("pixel_reencode", BETA) and imgs.shape[0] >= nxt:
@@ -978,10 +1252,35 @@ class H3MDLoopSampler:
                 aud = D.fit_audio_to_frames(decode_audio(audio_vae, a), imgs.shape[0])  # H3MD syncfix: audio = picture length
                 report[-1]["decoded_frames"] = int(imgs.shape[0])
                 imgs = self._seam.tone(imgs, trims[-1], where, report[-1])  # H3MD seam hook (no-op when off)
+                moved_to = redraw_arc
                 if rerun and k in rerun:  # H3MD rerun: old files -> _replaced_<time> only once the new ones exist
                     cache.archive(k, archive)
-                cache.write(k, key, final, imgs, aud, {"trim": trims[-1], "report": report[-1]},
-                            lowres=prev_low if beta else None)
+                    moved_to = archive
+                elif redraw and redraw_arc is None:   # local redraw: the previous version is kept in the archive
+                    moved_to = cache.archive_dir()
+                    cache.archive(k, moved_to)
+                try:
+                    cache.write(k, key, final, imgs, aud,
+                                dict({"trim": trims[-1], "report": report[-1],
+                                      "cuts": [int(c) for c in seg.get("windowCuts") or []]},   # redraw check
+                                     **({"base_key": base_key, "redraw": redraw} if redraw else {})),
+                                lowres=prev_low if beta else None)
+                except BaseException:
+                    # 11-08 review: with chunked decode the frames are decoded WHILE they are written; a failure or a
+                    # cancel there must not leave the segment missing - the previous version goes back in place
+                    if moved_to is not None:
+                        if hasattr(imgs, "_old"):
+                            imgs._old = None   # release the memmap of the archived frames (Windows can't move it)
+                        gc.collect()
+                        try:
+                            cache.restore(k, moved_to)
+                        except Exception as exc:
+                            LOG.warning("%s %s: previous version not restored from %s (%s)", _TAG, where, moved_to,
+                                        exc)
+                    raise
+                if getattr(imgs, "reused", 0):
+                    LOG.info("%s %s: local redraw: %d chunk(s) decoded, %d copied unchanged", _TAG, where,
+                             imgs.decoded, imgs.reused)
                 del imgs, aud, v, a
                 gc.collect()
                 h3md_vram.soft_empty_cache(f"(after caching {where})")
@@ -1006,7 +1305,10 @@ class H3MDLoopSampler:
             # --- H3MD stream save hook: 'long video' describes the on-disk merge for H3MD Save Video Interp ---
             self._segments_info = SS.segments_info(cache.dir, indices, trims, self._post["merge_overlap_source"],
                                                    audio_crossfade_ms,
-                                                   "per_segment")
+                                                   "per_segment",
+                                                   # 0.4.0: hard cuts inside a segment (window-mode groups) so
+                                                   # the save node never interpolates across them
+                                                   [segs[k].get("windowCuts") or [] for k in indices])
             # never concatenated in RAM: audio only (small); the frames stay on disk for H3MD Save Video Interp
             _idr = plan.get("idRef") if isinstance(plan, dict) else None   # 2026-10-28 idref
             if _idr and _idr.get("file"):

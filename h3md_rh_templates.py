@@ -3,12 +3,15 @@
 Each template returns an H3MD plan v1 dict (see h3md_rh_core/h3md_director.py).  Users only fill a few fields
 (who, scene, music start, shot lines); everything else is fixed here, tested on RH / locally (2026-11-06).
 
-  mv            photo + song -> 8 hard-cut shots of 243 frames (10.125 s), medium close-ups / close-ups,
-                the song locked as soundtrack, each shot at start + 10.125 * i seconds of the song
+  mv            photo + song -> hard-cut shots (medium close-ups / close-ups) that fill the length cap (30 s: 3 shots
+                of 226 frames = 9.4 s), the song locked as soundtrack, each shot at start + shot length * i seconds
   motion_copy   guide video + face photo + full-body photo -> one long shot that copies the guide's motion
                 (TARA: global prompt "motion_transfer:", guide = <Video 1>, its soundtrack locked).  The Director
                 rounds the length down to 5+17n so it never runs past the clip end; autosplit cuts it into parts.
-  story         photo + 1..8 shot lines -> one hard-cut shot of 243 frames per line
+  story         photo + 1..8 shot lines -> one hard-cut shot per line, all shots shortened together to fit the
+                length cap (at least 4.5 s each; lines that do not fit are dropped and named in the summary)
+
+0.4.3-rh1: every template fits in MAX_SECONDS (30 s) and MAX_MEGAPIXELS (1.0) - the RunningHub limits.
 """
 from __future__ import annotations
 
@@ -19,8 +22,12 @@ FPS = 24
 SHOT = 243                      # 10.125 s, 5 + 17 * 14
 SHOT_SEC = SHOT / FPS
 HIRES_TRIGGER = "r64, r34l1sm"  # high-res LoRA trigger words used by the RH workflows
+MAX_SECONDS = 30.0              # 0.4.3-rh1: whole video at most 30 s (RunningHub task time / cost)
+MAX_MEGAPIXELS = 1.0            # 0.4.3-rh1: at most 1 MP per frame (1344x768 at 16:9)
+MIN_SHOT = 107                  # 5 + 17 * 6 = 4.46 s: shortest shot a template makes when it shortens shots
 
 TEMPLATES = ["mv", "motion_copy", "story", "custom"]
+NOTES_KEY = "_rhNotes"          # template notes for the summary; removed by the Director before the plan is built
 
 _CLEAN = re.compile(r'[\r\n\\"{}]+')
 
@@ -35,6 +42,28 @@ def clean(text: str, fallback: str = "") -> str:
 def frames_5_17n_down(frames: float) -> int:
     n = max(0, math.floor((float(frames) - 5) / 17))
     return 5 + 17 * n
+
+
+def cap_seconds(max_seconds: float = 0.0) -> float:
+    """User value -> seconds actually allowed: 0 (or empty) = MAX_SECONDS; anything above MAX_SECONDS is cut to it;
+    below 5 s is raised to 5 s."""
+    try:
+        v = float(max_seconds or 0.0)
+    except (TypeError, ValueError):
+        v = 0.0
+    if v <= 0:
+        return MAX_SECONDS
+    return max(5.0, min(v, MAX_SECONDS))
+
+
+def cap_frames(max_seconds: float = 0.0) -> int:
+    """Frame budget (5+17n) for the whole video."""
+    return frames_5_17n_down(cap_seconds(max_seconds) * FPS)
+
+
+def shot_length(budget: int, count: int) -> int:
+    """Length of each of `count` equal hard-cut shots that fit in `budget` frames (never longer than SHOT)."""
+    return min(SHOT, frames_5_17n_down(budget / max(1, int(count))))
 
 
 # ---------------------------------------------------------------------------------------------------------- MV
@@ -85,12 +114,24 @@ MV_SHOTS = [
 ]
 
 
+def mv_shot_plan(max_seconds: float = 0.0):
+    """(shot indices into MV_SHOTS, frames per shot) for the length cap: as many ~10 s shots as fit (at least one),
+    shortened together so they fit; the last one is always the closing shot."""
+    budget = cap_frames(max_seconds)
+    count = max(1, min(len(MV_SHOTS), round(budget / SHOT)))
+    length = shot_length(budget, count)
+    idx = list(range(count - 1)) + [len(MV_SHOTS) - 1] if count > 1 else [0]
+    return idx, length
+
+
 def mv(who: str, scene: str, image_file: str, audio_file: str, music_start: float = 0.0,
-       width: int = 1344, height: int = 768) -> dict:
+       width: int = 1344, height: int = 768, max_seconds: float = 0.0) -> dict:
     who = clean(who, "a young woman")
     scene = clean(scene, "a sunny beach")
+    idx, length = mv_shot_plan(max_seconds)
     segs = []
-    for i, (summ, desc) in enumerate(MV_SHOTS):
+    for i, k in enumerate(idx):
+        summ, desc = MV_SHOTS[k]
         prompt = ("subject_definitions:\n<Subject 1> is the person shown in <Picture 1>: " + who + ".\n"
                   "<Audio 1> is the song of the music video.\n\n"
                   "summary:\nreference generation + audio reuse. <Subject 1> " + summ.format(d=scene) +
@@ -102,8 +143,8 @@ def mv(who: str, scene: str, image_file: str, audio_file: str, music_start: floa
                   "detailed_description:\n" + MV_STYLE + desc.format(d=scene) + " " + MV_KEEP + "\n\n"
                   "overall_soundscape:\nA soft, natural ambience of the place and the faint rustle of clothes.\n\n"
                   "non_diegetic_music:\n<Audio 1> plays unchanged as the soundtrack.")
-        offset = round(float(music_start) + SHOT_SEC * i, 3)
-        segs.append({"length": SHOT, "overlapIn": 0, "prompt": prompt, "images": ["img1"], "videos": [],
+        offset = round(float(music_start) + length / FPS * i, 3)
+        segs.append({"length": length, "overlapIn": 0, "prompt": prompt, "images": ["img1"], "videos": [],
                      "audios": [{"id": "aud1", "mode": "locked", "offset": offset}], "audioMode": "reference"})
     return {"version": 1, "fps": FPS, "width": width, "height": height,
             "globalPrompt": HIRES_TRIGGER, "globalMode": "prepend",
@@ -115,12 +156,10 @@ def mv(who: str, scene: str, image_file: str, audio_file: str, music_start: floa
 # ------------------------------------------------------------------------------------------------- motion copy
 def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, video_file: str,
                 video_seconds: float, max_seconds: float = 0.0, width: int = 704, height: int = 1024) -> dict:
-    """One long TARA shot.  max_seconds > 0 limits how much of the guide is used (cost control)."""
+    """One long TARA shot.  Uses at most cap_seconds(max_seconds) of the guide (30 s; 0 = up to 30 s)."""
     who = clean(who, "a young woman with long dark hair, wearing a simple fitted dress")
     scene = clean(scene, "a cozy living room at night, lit by warm, soft lamps")
-    use = float(video_seconds)
-    if max_seconds and max_seconds > 0:
-        use = min(use, float(max_seconds))
+    use = min(float(video_seconds), cap_seconds(max_seconds))
     length = frames_5_17n_down(use * FPS)
     images = ["face"] + (["body"] if body_file else [])
     pics = ("<Picture 1> defines the face and identity, <Picture 2> the full figure and outfit"
@@ -160,8 +199,16 @@ def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, vid
 
 
 # ------------------------------------------------------------------------------------------------------- story
-def story(who: str, scene: str, shots: str, image_file: str, width: int = 1344, height: int = 768) -> dict:
-    """One hard-cut 243-frame shot per non-empty line of `shots` (max 8)."""
+def story_shot_plan(line_count: int, max_seconds: float = 0.0):
+    """(lines kept, frames per shot): all shots shortened together to fit the cap, none shorter than MIN_SHOT."""
+    budget = cap_frames(max_seconds)
+    keep = max(1, min(int(line_count), budget // MIN_SHOT))
+    return keep, shot_length(budget, keep)
+
+
+def story(who: str, scene: str, shots: str, image_file: str, width: int = 1344, height: int = 768,
+          max_seconds: float = 0.0) -> dict:
+    """One hard-cut shot per non-empty line of `shots` (max 8), all fitting in the length cap."""
     who = clean(who, "a young woman")
     scene = clean(scene, "")
     lines = [clean(x) for x in str(shots or "").splitlines()]
@@ -169,6 +216,14 @@ def story(who: str, scene: str, shots: str, image_file: str, width: int = 1344, 
     if not lines:
         raise ValueError("H3MD RH story: write at least one shot line (one line per shot). "
                          "故事模板：请至少写一行镜头描述（一行一个镜头）。")
+    keep, length = story_shot_plan(len(lines), max_seconds)
+    notes = []
+    if keep < len(lines):
+        span = f"{keep + 1}" if keep + 1 == len(lines) else f"{keep + 1}-{len(lines)}"
+        notes.append(f"story: {len(lines)} lines do not fit in {cap_seconds(max_seconds):g} s - kept the first {keep} "
+                     f"(line {span} dropped). 故事：{len(lines)} 行放不进 {cap_seconds(max_seconds):g} "
+                     f"秒，只用前 {keep} 行（第 {span} 行没用上）。")
+        lines = lines[:keep]
     segs = []
     for line in lines:
         where = f" The scene: {scene}." if scene else ""
@@ -182,12 +237,15 @@ def story(who: str, scene: str, shots: str, image_file: str, width: int = 1344, 
                   "keeps the exact facial identity of <Picture 1>. All motion plays at natural real-time speed.\n\n"
                   "overall_soundscape:\nNatural ambient sound of the place that matches the action.\n\n"
                   "non_diegetic_music:\nNone.")
-        segs.append({"length": SHOT, "overlapIn": 0, "prompt": prompt, "images": ["img1"], "videos": [],
+        segs.append({"length": length, "overlapIn": 0, "prompt": prompt, "images": ["img1"], "videos": [],
                      "audios": [], "audioMode": "none"})
-    return {"version": 1, "fps": FPS, "width": width, "height": height,
+    plan = {"version": 1, "fps": FPS, "width": width, "height": height,
             "globalPrompt": HIRES_TRIGGER, "globalMode": "prepend",
             "media": {"images": [{"id": "img1", "file": image_file}], "videos": [], "audios": [], "refmods": []},
             "segments": segs, "refVideoHeight": "auto", "idRef": "img1"}
+    if notes:
+        plan[NOTES_KEY] = notes
+    return plan
 
 
 # ------------------------------------------------------------------------------------------------------- size
@@ -201,7 +259,7 @@ def size_for(aspect: str, megapixels: float, video_wh=None) -> tuple:
     else:
         a, b = (aspect if aspect != "follow video" else "9:16").split(":")
         ar = float(a) / float(b)
-    px = max(0.1, float(megapixels)) * 1_000_000
+    px = min(MAX_MEGAPIXELS, max(0.1, float(megapixels))) * 1_000_000
     w = max(64, round(math.sqrt(px * ar) / 64) * 64)
     h = max(64, round(math.sqrt(px / ar) / 64) * 64)
     return int(w), int(h)

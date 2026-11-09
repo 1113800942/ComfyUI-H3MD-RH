@@ -135,6 +135,19 @@ def _write_low_head(low_video, low_mask, head_latent):
     return low_video
 
 
+def _write_low_base(low_video, low_mask, base_latent):
+    """H3MD local redraw (0.4.0): every KEPT row (mask 0) of the low-res pass comes from the segment's own native
+    low-res result instead of the downscaled final latent (a trilinear downscale of the final latent is not what the
+    low-res pass makes; as context it gave a washed-out, doubled redraw in the 11-08 test)."""
+    base = _split(base_latent["samples"])[0][0]
+    if base.shape != low_video.shape:
+        raise ValueError(f"Luna-H3-Sampler: low_res_base {tuple(base.shape)} must match the low-res video "
+                         f"{tuple(low_video.shape)}")
+    if low_mask is None:
+        raise ValueError("Luna-H3-Sampler: low_res_base needs a noise mask (0 = kept rows)")
+    return torch.where(low_mask == 0, base.to(low_video), low_video)
+
+
 def _write_low_tail(low_video, low_mask, tail_latent):
     """H3MD rerun (2026-10-30): the kept video SUFFIX of the low-res pass (tail lock to the next segment's head)."""
     tail = _split(tail_latent["samples"])[0][0]
@@ -173,7 +186,8 @@ def _sample(model, noise, latent, masks, nested, positive, negative, cfg, sample
 def two_pass_sample(low_res_model, positive, negative, vae, latent_image, sampler_low, sampler_high, scheduler,
                     total_steps, transition, noise_seed, cfg_low, cfg_high, lowres_scale, rho, w_min, w_max,
                     latent_lifter=None, high_res_model=None, low_res_head=None, highres_denoise=None,
-                    sigmas_low=None, sigmas_high=None, lift=None, low_res_tail=None):
+                    sigmas_low=None, sigmas_high=None, lift=None, low_res_tail=None, pass1_store=None,
+                    low_only=False, low_res_base=None):
     """Return (latent, low_res_latent), both ComfyUI LATENT dicts in VAE space.
 
     `sigmas_low` / `sigmas_high` override the computed schedules. `lift` defaults to `luna_lift.lift_video`.
@@ -227,6 +241,8 @@ def two_pass_sample(low_res_model, positive, negative, vae, latent_image, sample
     low_masks = None
     if masks is not None:
         low_masks = [_resize_video(masks[0], (T, h, w), "nearest")] + masks[1:]
+    if low_res_base is not None:   # H3MD local redraw: the kept rows are the segment's own low-res result
+        low_video = _write_low_base(low_video, low_masks[0] if low_masks else None, low_res_base)
     if low_res_head is not None:
         low_video = _write_low_head(low_video, low_masks[0] if low_masks else None, low_res_head)
     if low_res_tail is not None:  # H3MD rerun: tail lock on the low grid
@@ -234,9 +250,19 @@ def two_pass_sample(low_res_model, positive, negative, vae, latent_image, sample
     low_in = [low_video] + audio
     low_latent = _pack(low_in, nested)
     last_x0 = {}
-    state_vae = _sample(low_res_model, comfy.sample.prepare_noise(low_latent, noise_seed, batch_index), low_latent,
-                        low_masks, nested, _keyframes_at(positive, h, w), _keyframes_at(negative, h, w), cfg_low,
-                        sampler_low, sigmas_low, noise_seed, on_x0=lambda x0: last_x0.__setitem__("x0", x0))
+    cached = pass1_store.load_pass1() if pass1_store is not None else None   # H3MD progress cache
+    if cached is not None:
+        last_x0["x0"], state_vae = cached[0].to(device), cached[1].to(device)
+    else:
+        state_vae = _sample(low_res_model, comfy.sample.prepare_noise(low_latent, noise_seed, batch_index),
+                            low_latent, low_masks, nested, _keyframes_at(positive, h, w),
+                            _keyframes_at(negative, h, w), cfg_low, sampler_low, sigmas_low, noise_seed,
+                            on_x0=lambda x0: last_x0.__setitem__("x0", x0))
+        if pass1_store is not None and "x0" in last_x0:
+            try:
+                pass1_store.save_pass1(last_x0["x0"], state_vae)
+            except Exception as exc:
+                logging.warning("[H3MD Progress] could not save the low-res pass (%s)", exc)
     if "x0" not in last_x0:
         raise RuntimeError("Luna-H3-Sampler: pass 1 gave no clean estimate (the sampler reported no step)")
     x0_streams = [s.to(device).float() for s in _split(last_x0["x0"])[0]]
@@ -263,6 +289,18 @@ def two_pass_sample(low_res_model, positive, negative, vae, latent_image, sample
         audio_eps.append(eps / noise_scale_high)  # the sampler multiplies its noise by noise_scale
     if masks is not None:  # a locked song stays the song
         audio_x0 = [torch.where(m == 0, a, x) for x, a, m in zip(audio_x0, audio, masks[1:])]
+
+    if low_only:   # H3MD window-exp preview: stop after pass 1; the lifted low-res result is the output
+        dtype = comfy.model_management.intermediate_dtype()
+        out_streams = [s.to(device=device, dtype=dtype) for s in [lifted] + audio_x0]
+        if masks is not None:
+            out_streams = _restore_exact(out_streams, [video] + audio, masks)
+        logging.info("[Luna-H3-Sampler] low-res preview: high-res pass skipped")
+        latent = latent_image.copy()
+        latent["samples"] = _pack(out_streams, nested)
+        low_res_latent = latent_image.copy()
+        low_res_latent["samples"] = _pack([z0_low.to(dtype=dtype)] + out_streams[1:], nested)
+        return latent, low_res_latent
 
     # Pass 2: the rest of the schedule at the high grid.
     high_masks = masks if masks is not None else None
