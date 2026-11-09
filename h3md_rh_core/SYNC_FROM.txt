@@ -1,2 +1,2 @@
 main version 0.4.3
-main commit e4d021de2f524a1ec7146eeab83e186e34b6ebe8 v0.4.3: Control Panel LoRA dropdowns hold only their own LoRA until opened (full models/loras list filled on open/focus)
+main commit 4a72a0026482f71230a32cbf40e6e4a7cb5e86e4 Fix: delete_cache_after_save deletes run folders that hold run.json (the run's base seed); before, every run cache was kept

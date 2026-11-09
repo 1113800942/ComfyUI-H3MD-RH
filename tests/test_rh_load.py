@@ -144,4 +144,12 @@ assert all(os.path.isfile(m["file"]) for m in json.loads(text)["media"]["images"
 est = N.cache_estimate_bytes({"width": 1920, "height": 1088, "segments": [{"length": 1}]})
 assert est == 1920 * 1088 * 3     # 6.3 MB per 1920x1088 frame, as measured on 11-08
 print("loop RH ok: uint8 forced, leftovers cleared, disk checked")
+# Save RH: a run folder holding run.json (the run's base seed) is deleted after saving (11-09 T1b: it was kept)
+SS = sys.modules["h3md_rh.h3md_rh_core.h3md_stream_save"]
+rd = os.path.join(tempfile.mkdtemp(), "run_20261109_145623_10012_83503")
+os.makedirs(os.path.join(rd, "seg_000_progress"))
+for f in ("run.json", "seg_000.json", "seg_000_frames.npy"):
+    open(os.path.join(rd, f), "wb").write(b"x")
+assert SS.delete_cache_dir(rd) and not os.path.exists(rd)
+print("save RH ok: run cache with run.json deleted")
 print("ALL OK")
