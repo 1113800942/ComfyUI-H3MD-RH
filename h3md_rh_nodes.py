@@ -179,11 +179,13 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
                 "video": ("VIDEO", {"tooltip": "motion_copy: the guide video. From Load Video. 动作复刻：原片"}),
                 "plan_json": ("STRING", {"multiline": True, "default": "", "tooltip":
                               "custom: an H3MD plan v1 JSON. 自定义计划"}),
-                "seamless": ("BOOLEAN", {"default": True, "tooltip":
+                "seamless": ("BOOLEAN", {"default": False, "tooltip":
                              "motion_copy: render the whole shot as one seamless take (CCW context windows, needs the "
-                             "core MiniMax H3 context windows; without them it falls back to segments by itself). "
+                             "core MiniMax H3 context windows; without them it falls back to segments by itself). Off by "
+                             "default: with TARA a jump can still show where two windows hand over (11-09 test). "
                              "mv / story are hard cuts and are not affected. "
-                             "动作复刻：整段无接缝（接续窗口 CCW）；没有核心窗口节点时自动改回分段。MV、故事不受影响"}),
+                             "动作复刻：整段无接缝（接续窗口 CCW）。默认关：和 TARA 一起用时，两个窗口交接处还可能跳一下"
+                             "（11-09 实测）。MV、故事不受影响"}),
             },
         }
 
@@ -200,7 +202,7 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
 
     @staticmethod
     def make_plan(template, who, scene, aspect, megapixels, music_start, max_seconds, shots,
-                  image=None, image_2=None, audio=None, video=None, plan_json="", seamless=True):
+                  image=None, image_2=None, audio=None, video=None, plan_json="", seamless=False):
         raw = H3MDDirectorRH._template_plan(template, who, scene, aspect, megapixels, music_start, max_seconds,
                                             shots, image, image_2, audio, video, plan_json)
         notes = list(raw.pop(T.NOTES_KEY, None) or [])
@@ -247,7 +249,7 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
         raise ValueError(f"{_TAG} unknown template {template!r}")
 
     def build_rh(self, template, who, scene, aspect, megapixels, music_start, max_seconds, shots,
-                 image=None, image_2=None, audio=None, video=None, plan_json="", seamless=True):
+                 image=None, image_2=None, audio=None, video=None, plan_json="", seamless=False):
         raw = self.make_plan(template, who, scene, aspect, megapixels, music_start, max_seconds, shots,
                              image, image_2, audio, video, plan_json, seamless)
         notes = list(raw.pop(T.NOTES_KEY, None) or [])

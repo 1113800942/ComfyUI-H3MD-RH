@@ -52,6 +52,7 @@ class V:
     def get_stream_source(self): return vp
 plan, n, total, summ, info, text = d.build_rh("motion_copy", image=img, image_2=img, video=V(),
                                               **dict(base, aspect="follow video"))
+assert not plan.get("windowMode"), "seamless is off by default (11-09: TARA + windows still jump at the hand-over)"
 raw = json.loads(text)
 print("motion_copy", n, total, plan["width"], plan["height"], raw["segments"][0]["length"], summ.splitlines()[:3])
 assert raw["segments"][0]["length"] == 175 and (total - 5) % 17 == 0 and total <= 180

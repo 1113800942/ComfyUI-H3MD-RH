@@ -113,7 +113,7 @@ def build(info, kind, inputs):
     director = g.add("H3MDDirectorRH", (X0 + 360, Y0), {
         "template": kind, "who": inputs["who"], "scene": inputs["scene"], "aspect": inputs["aspect"],
         "megapixels": 1.0, "music_start": inputs.get("music_start", 0.0), "max_seconds": inputs.get("max_seconds", 0.0),
-        "shots": inputs.get("shots", ""), "seamless": True},
+        "shots": inputs.get("shots", ""), "seamless": False},
         "H3MD Director RH（填人物 / 场景；最长 30 秒、1 MP）", (420, 660))
     g.link(img, 0, director, "image")
     if img2:
