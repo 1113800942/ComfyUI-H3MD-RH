@@ -80,6 +80,7 @@ print("caps ok: story 7 lines ->", n, "shots,", total, "frames")
 plan, n, total, summ, info, text = d.build_rh("motion_copy", image=img, image_2=img, video=V(), seamless=True,
                                               **dict(base, aspect="follow video"))
 assert json.loads(text).get("windowMode") is True and plan.get("windowMode"), "seamless must write windowMode"
+assert json.loads(text)["refVideoHeight"] == "480" and plan["refVideoHeight"] == "480", "guide video at short edge 480"
 assert (plan["windowMode"] or {}).get("chain") is True
 plan_off, *_ = d.build_rh("motion_copy", image=img, image_2=img, video=V(), seamless=False,
                           **dict(base, aspect="follow video"))

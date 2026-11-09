@@ -6,7 +6,8 @@ Each template returns an H3MD plan v1 dict (see h3md_rh_core/h3md_director.py). 
   mv            photo + song -> hard-cut shots (medium close-ups / close-ups) that fill the length cap (30 s: 3 shots
                 of 226 frames = 9.4 s), the song locked as soundtrack, each shot at start + shot length * i seconds
   motion_copy   guide video + face photo + full-body photo -> one long shot that copies the guide's motion
-                (TARA: global prompt "motion_transfer:", guide = <Video 1>, its soundtrack locked).  The Director
+                (TARA: global prompt "motion_transfer:", guide = <Video 1> encoded at short edge 480, its soundtrack
+                locked).  The Director
                 rounds the length down to 5+17n so it never runs past the clip end; autosplit cuts it into parts.
   story         photo + 1..8 shot lines -> one hard-cut shot per line, all shots shortened together to fit the
                 length cap (at least 4.5 s each; lines that do not fit are dropped and named in the summary)
@@ -25,6 +26,9 @@ HIRES_TRIGGER = "r64, r34l1sm"  # high-res LoRA trigger words used by the RH wor
 MAX_SECONDS = 30.0              # 0.4.3-rh1: whole video at most 30 s (RunningHub task time / cost)
 MAX_MEGAPIXELS = 1.0            # 0.4.3-rh1: at most 1 MP per frame (1344x768 at 16:9)
 MIN_SHOT = 107                  # 5 + 17 * 6 = 4.46 s: shortest shot a template makes when it shortens shots
+GUIDE_HEIGHT = "480"            # 0.4.3-rh1: motion copy encodes the guide video at short edge 480 - the motion is
+                                # set in the low-res pass; a 1080p guide filled a 32 GB card in the high-res pass
+                                # (11-09 test: 1920x1088 guide at 1344x760 -> 106k fixed rows per strip, 12 strips)
 
 TEMPLATES = ["mv", "motion_copy", "story", "custom"]
 NOTES_KEY = "_rhNotes"          # template notes for the summary; removed by the Director before the plan is built
@@ -195,7 +199,7 @@ def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, vid
                           "videos": [{"id": "guide", "trimStart": 0.0, "useSoundtrack": False, "depth": False,
                                       "useDuration": round(length / FPS, 6)}],
                           "audios": [], "audioMode": "locked", "locked": {"source": "video:guide", "offset": 0.0}}],
-            "refVideoHeight": "auto"}
+            "refVideoHeight": GUIDE_HEIGHT}
 
 
 # ------------------------------------------------------------------------------------------------------- story
