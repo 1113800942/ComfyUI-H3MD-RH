@@ -10,7 +10,7 @@
 |---|---|
 | 包名 / 版本 | `ComfyUI-H3MD-RH` 0.4.3-rh1（引擎 = 主仓库 0.4.3，`h3md_rh_core/SYNC_FROM.txt` 记着来源 commit） |
 | 节点 | 4 个，类名都以 RH 结尾，和任何版本的 ComfyUI-H3MD-Director、ComfyUI-BFSNodes 都不撞名：`H3MDDirectorRH`、`H3MDLoopSamplerRH`、`H3MDSaveVideoRH`、`H3MDTaraRH` |
-| 额外的 pip 包 | **没有**（只用 ComfyUI 自带的 torch、numpy、PyAV、Pillow） |
+| 额外的 pip 包 | **没有**（只用 ComfyUI 自带的 torch、numpy、PyAV、Pillow、transformers） |
 | 前端 / 网页接口 | **没有**：不带 `WEB_DIRECTORY`（没有前端脚本），不注册任何 HTTP 路由 |
 | 联网 / 下载 | **没有**：运行时不访问网络、不下载模型或程序、不 pip install |
 | 许可证 | AGPL-3.0-or-later；`h3md_rh_tara/` 来自 ComfyUI-BFSNodes（GPL-3.0），见 `NOTICE.md`。作者同意 RunningHub 安装和使用本包 |
@@ -50,7 +50,9 @@
 | `H3SigmaRefiner` | ComfyUI-YCNodes-MiniMax-H3 |
 | `H3MDDirectorRH`、`H3MDLoopSamplerRH`、`H3MDSaveVideoRH`、`H3MDTaraRH` | 本包 |
 
-模型（文件名是我们本机的，RH 上按 RH 的文件名重新选）：MiniMax H3 hybrid b25-49 int8、Qwen3-VL 32B int8 文本编码器、视频 / 音频 VAE、H3 latent upscaler、turbo 768 加速 LoRA；动作复刻另加 TARA 动作迁移 LoRA（`minimax_h3_motion_transfer_tara_v1.0_ref2va`）。
+模型（文件名是我们本机的，RH 上按 RH 的文件名重新选）：MiniMax H3 hybrid b25-49 int8、Qwen3-VL 32B int8 文本编码器、视频 / 音频 VAE、H3 latent upscaler、turbo 768 加速 LoRA；动作复刻另加 TARA 动作迁移 LoRA（`minimax_h3_motion_transfer_tara_v1.0_ref2va`，RH 模型库里已经有）。
+
+TARA 节点：RH 上没有 ComfyUI-BFSNodes 的 `BFSMiniMaxH3NativeTemporal`，所以它的代码整份带在本包的 `h3md_rh_tara/` 里，节点名 `H3MDTaraRH`，不用另装 BFSNodes，也不用另装 pip 包。
 
 ## 四、怎么核对
 
@@ -73,7 +75,7 @@ This pack is the RunningHub build of [H3MD Director](https://github.com/11138009
 |---|---|
 | Package / version | `ComfyUI-H3MD-RH` 0.4.3-rh1 (engine = main repo 0.4.3; source commit in `h3md_rh_core/SYNC_FROM.txt`) |
 | Nodes | 4, all class names end in RH, so no clash with any ComfyUI-H3MD-Director or ComfyUI-BFSNodes: `H3MDDirectorRH`, `H3MDLoopSamplerRH`, `H3MDSaveVideoRH`, `H3MDTaraRH` |
-| Extra pip packages | **None** (only what ComfyUI ships: torch, numpy, PyAV, Pillow) |
+| Extra pip packages | **None** (only what ComfyUI ships: torch, numpy, PyAV, Pillow, transformers) |
 | Frontend / web API | **None**: no `WEB_DIRECTORY`, no HTTP routes |
 | Network / downloads | **None**: no network access, no model or code downloads, no pip install at run time |
 | Licence | AGPL-3.0-or-later; `h3md_rh_tara/` from ComfyUI-BFSNodes (GPL-3.0), see `NOTICE.md`. The author agrees to RunningHub installing and running this pack |
@@ -113,7 +115,9 @@ The cleanup in point 5 assumes one task at a time per ComfyUI server (ComfyUI's 
 | `H3SigmaRefiner` | ComfyUI-YCNodes-MiniMax-H3 |
 | `H3MDDirectorRH`, `H3MDLoopSamplerRH`, `H3MDSaveVideoRH`, `H3MDTaraRH` | this pack |
 
-Models (our local file names; pick RH's own names): MiniMax H3 hybrid b25-49 int8, Qwen3-VL 32B int8 text encoder, video / audio VAE, H3 latent upscaler, turbo 768 LoRA; motion copy also uses the TARA motion-transfer LoRA (`minimax_h3_motion_transfer_tara_v1.0_ref2va`).
+Models (our local file names; pick RH's own names): MiniMax H3 hybrid b25-49 int8, Qwen3-VL 32B int8 text encoder, video / audio VAE, H3 latent upscaler, turbo 768 LoRA; motion copy also uses the TARA motion-transfer LoRA (`minimax_h3_motion_transfer_tara_v1.0_ref2va`, already in RH's model library).
+
+TARA node: RH does not have ComfyUI-BFSNodes' `BFSMiniMaxH3NativeTemporal`, so its code ships whole in this pack's `h3md_rh_tara/` as `H3MDTaraRH`; no BFSNodes install and no pip packages needed.
 
 ## 4. How to check
 
