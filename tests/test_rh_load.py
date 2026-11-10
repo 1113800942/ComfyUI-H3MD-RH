@@ -106,7 +106,14 @@ plan, n, total, summ, info, text = d.build_rh("motion_copy", image=img, image_2=
                                               **dict(base, aspect="follow video", scene=""))
 pr = mc_prompt(json.loads(text))
 assert "locked-off" not in pr and "dances in" not in pr and "stay the same from start to end" not in pr, pr
-assert "surroundings are the ones in <Video 1>" in pr and "camera moves exactly like the camera of <Video 1>" in pr
+assert "surroundings are the ones in <Video 1>" in pr and "tracking shot that moves exactly like the camera of <Video 1>" in pr
+# moving guide + empty scene = word for word the prompt that joined cleanly in T1d (11-09)
+_t1d = T.motion_copy("a young woman, wearing the outfit shown in the photo", "", "f", "b", "v", 12.25, 0.0, 1344, 768,
+                     camera_moves=True)["segments"][0]["prompt"]
+assert _t1d == open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "t1d_prompt.txt"),
+                    encoding="utf-8").read(), "moving guide + empty scene must stay the T1d prompt"
+_still = T.motion_copy("w", "", "f", None, "v", 12.25, camera_moves=False)["segments"][0]["prompt"]
+assert "tracking" not in _still and "when the guide's camera stands still, it stands still" in _still
 assert "camera moves" not in summ.split("H3MD plan")[0], summ[:300]          # empty scene: no note
 plan, n, total, summ, info, text = d.build_rh("motion_copy", image=img, image_2=img, video=V(),
                                               **dict(base, aspect="follow video", scene="a rooftop at sunset"))

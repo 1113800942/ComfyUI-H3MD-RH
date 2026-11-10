@@ -173,7 +173,8 @@ def camera_note(score: float, scene: str) -> str | None:
 
 
 def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, video_file: str,
-                video_seconds: float, max_seconds: float = 0.0, width: int = 704, height: int = 1024) -> dict:
+                video_seconds: float, max_seconds: float = 0.0, width: int = 704, height: int = 1024,
+                camera_moves: bool | None = None) -> dict:
     """One long TARA shot that copies the guide's motion.  Uses at most cap_seconds(max_seconds) of the guide.
 
     0.4.3-rh2 (11-09): the camera moves exactly like the guide's (a locked-off guide gives a locked-off shot), so any
@@ -182,7 +183,9 @@ def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, vid
                       run joined cleanly at the window hand-over; the old 'locked-off, in <scene>, the place stays the
                       same' prompt made the second window jump back to the scene words)
       scene filled -> a new setting that moves past with the camera (YJ 16:07: kept even when the guide's camera moves;
-                      the Director adds a note then, see guide_camera_moves)"""
+                      the Director adds a note then, see guide_camera_moves)
+    camera_moves (the Director's guide_camera_moves above CAMERA_MOVES): the shot is written as a tracking shot -
+    with an empty scene word for word the prompt tested in T1d (tests/fixtures/t1d_prompt.txt)."""
     who = clean(who, "a young woman with long dark hair, wearing a simple fitted dress")
     scene = clean(scene)
     use = min(float(video_seconds), cap_seconds(max_seconds))
@@ -192,14 +195,24 @@ def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, vid
             if body_file else "<Picture 1> defines the face, figure and outfit")
     ret = ("identity from <Picture 1>, figure and outfit from <Picture 2>" if body_file
            else "identity, figure and outfit from <Picture 1>")
+    moving = bool(camera_moves)
     if scene:
         supplies = "the motion, poses, gestures, timing and the camera movement"
         summary = (f"Transfer the performance of <Video 1> to <Subject 1>, preserving the action order, timing and "
-                   f"the camera movement of the guide, in a new setting: {scene}.")
+                   f"the {'moving camera' if moving else 'camera movement'} of the guide, in a new setting: {scene}.")
         keep = ("its motion, timing and camera movement are transferred to <Subject 1>; its setting is replaced by "
                 f"{scene}.")
-        place = (f"The setting is {scene}: as the camera moves, it passes by continuously as one place, in the same "
-                 "light from start to end; nothing in the background jumps, resets or repeats.")
+        place = (f"The setting is {scene}: as the camera moves, it passes by continuously as one "
+                 f"{'route' if moving else 'place'}, in the same light from start to end; nothing in the background "
+                 "jumps, resets or repeats.")
+    elif moving:   # T1d, word for word
+        supplies = "the motion, poses, timing, the camera movement and the surroundings"
+        summary = ("Replace the person in <Video 1> with <Subject 1>, preserving the motion, timing, the moving camera "
+                   "and the surroundings of the guide exactly.")
+        keep = "its motion, timing, camera movement and surroundings are kept; only the person is replaced by <Subject 1>."
+        place = ("The surroundings are the ones in <Video 1> and pass by exactly as in <Video 1>, in the same order and "
+                 "at the same moments, as one continuous route; nothing in the background jumps, resets or repeats. "
+                 "The light stays the same.")
     else:
         supplies = "the motion, poses, gestures, timing, the camera movement and the surroundings"
         summary = ("Replace the person in <Video 1> with <Subject 1>, preserving the motion, timing, the camera "
@@ -208,6 +221,15 @@ def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, vid
         place = ("The surroundings are the ones in <Video 1> and pass by exactly as in <Video 1>, in the same order and "
                  "at the same moments, as one continuous place; nothing in the background jumps, resets or repeats. "
                  "The light stays the same.")
+    if moving:
+        shot = "One continuous tracking shot that moves exactly like the camera of <Video 1>."
+        moves = ("<Subject 1> moves exactly like the person in <Video 1>: every step, arm swing, head turn and "
+                 "expression in order and at matching times.")
+    else:
+        shot = ("One continuous shot whose camera moves exactly like the camera of <Video 1> (when the guide's camera "
+                "stands still, it stands still).")
+        moves = ("<Subject 1> moves exactly like the person in <Video 1>: every step, arm swing, body movement, hand "
+                 "gesture, head turn and expression in order and at matching times.")
     prompt = (f"Duration: {length / FPS:.2f} s ({length} frames).\n\n"
               "subject_definitions:\n<Subject 1> is the person shown in " +
               ("<Picture 1> and <Picture 2>" if body_file else "<Picture 1>") + f": {pics}. <Subject 1> is {who}. "
@@ -216,12 +238,9 @@ def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, vid
               f"summary:\n[video generation + reference] {summary}\n"
               f"retention_analysis:\n<Subject 1>: fully_preserved - {ret}, identical in every moment. "
               f"<Video 1>: attribute_transfer - {keep}\n"
-              "detailed_description:\n[Shot 1] One continuous shot whose camera moves exactly like the camera of "
-              "<Video 1> (when the guide's camera stands still, it stands still). <Subject 1> moves exactly like the "
-              "person in <Video 1>: every step, arm swing, body movement, hand gesture, head turn and expression in "
-              f"order and at matching times. {place} <Subject 1> is the only person. The hands are empty with five "
-              "natural fingers each. Do not copy the reference pictures' still pose or backdrop as the motion or "
-              "setting.\n"
+              f"detailed_description:\n[Shot 1] {shot} {moves} {place} <Subject 1> is the only person. The hands "
+              "are empty with five natural fingers each. Do not copy the reference pictures' still pose or backdrop as "
+              "the motion or setting.\n"
               "overall_soundscape:\nKeep the source soundtrack; do not invent dialogue.\n" + HIRES_TRIGGER + "\n\n"
               "non_diegetic_music:\nThe source song plays unchanged as the soundtrack.")
     media_images = [{"id": "face", "file": face_file}] + ([{"id": "body", "file": body_file}] if body_file else [])

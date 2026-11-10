@@ -278,9 +278,10 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
                 raise ValueError(f"{_TAG} cannot read the guide video. 原片读不出来。")
             w, h = T.size_for(aspect, megapixels, video_size(vid))
             body = save_image(image_2, "body") if image_2 is not None else None
-            plan = T.motion_copy(who, scene, img, body, vid, seconds, max_seconds, w, h)
             moves = guide_camera_moves(vid, min(float(seconds), T.cap_seconds(max_seconds)))
-            LOG.info("%s motion copy: guide camera score %s (moves above %.0f), %s", _TAG,
+            plan = T.motion_copy(who, scene, img, body, vid, seconds, max_seconds, w, h,
+                                 camera_moves=None if moves is None else moves >= T.CAMERA_MOVES)
+            LOG.info("%s motion copy: guide camera score %s (moves at %.0f or more: tracking shot), %s", _TAG,
                      "n/a" if moves is None else f"{moves:.1f}", T.CAMERA_MOVES,
                      "new scene" if T.clean(scene) else "the guide's own surroundings")
             note = T.camera_note(moves, scene)
