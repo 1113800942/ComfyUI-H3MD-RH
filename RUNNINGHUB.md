@@ -1,4 +1,4 @@
-# H3MD RH 0.4.3-rh2 — 给 RunningHub 的说明 / Notes for RunningHub
+# H3MD RH 0.4.4-rh1 — 给 RunningHub 的说明 / Notes for RunningHub
 
 **中文在前，English below.**
 
@@ -8,7 +8,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| 包名 / 版本 | `ComfyUI-H3MD-RH` 0.4.3-rh2（引擎 = 主仓库 0.4.3，`h3md_rh_core/SYNC_FROM.txt` 记着来源 commit） |
+| 包名 / 版本 | `ComfyUI-H3MD-RH` 0.4.4-rh1（引擎 = 主仓库 0.4.4，`h3md_rh_core/SYNC_FROM.txt` 记着来源 commit） |
 | 节点 | 4 个，类名都以 RH 结尾，和任何版本的 ComfyUI-H3MD-Director、ComfyUI-BFSNodes 都不撞名：`H3MDDirectorRH`、`H3MDLoopSamplerRH`、`H3MDSaveVideoRH`、`H3MDTaraRH` |
 | 额外的 pip 包 | **没有**（只用 ComfyUI 自带的 torch、numpy、PyAV、Pillow、transformers） |
 | 前端 / 网页接口 | **没有**：不带 `WEB_DIRECTORY`（没有前端脚本），不注册任何 HTTP 路由 |
@@ -43,6 +43,8 @@
 
 `workflows/` 里三张示例（都是一次跑完整条，最长 30 秒）：MV 照片加歌、动作复刻、多镜头故事。第 ① 组是要在 AI 应用里开放的输入。
 
+动作复刻的使用条件（写在 AI 应用说明里给用户看）：原片要是**一个连续镜头**，中间不要有剪辑；镜头可以固定也可以跟拍。场景留空 = 用原片的景物（最稳）；填了场景 = 换成新场景，原片镜头在动时两个窗口交接处可能小跳一下（摘要里会提醒）。
+
 | 工作流用到的节点 | 来自 |
 |---|---|
 | `UNETLoader`、`CLIPLoader`（type minimax）、`VAELoader`、`LoraLoaderModelOnly`、`KSamplerSelect`、`BasicScheduler`、`LoadImage`、`LoadAudio`、`LoadVideo`、`MiniMaxH3ContextWindows` | ComfyUI 核心 |
@@ -73,7 +75,7 @@ This pack is the RunningHub build of [H3MD Director](https://github.com/11138009
 
 | Item | Detail |
 |---|---|
-| Package / version | `ComfyUI-H3MD-RH` 0.4.3-rh2 (engine = main repo 0.4.3; source commit in `h3md_rh_core/SYNC_FROM.txt`) |
+| Package / version | `ComfyUI-H3MD-RH` 0.4.4-rh1 (engine = main repo 0.4.4; source commit in `h3md_rh_core/SYNC_FROM.txt`) |
 | Nodes | 4, all class names end in RH, so no clash with any ComfyUI-H3MD-Director or ComfyUI-BFSNodes: `H3MDDirectorRH`, `H3MDLoopSamplerRH`, `H3MDSaveVideoRH`, `H3MDTaraRH` |
 | Extra pip packages | **None** (only what ComfyUI ships: torch, numpy, PyAV, Pillow, transformers) |
 | Frontend / web API | **None**: no `WEB_DIRECTORY`, no HTTP routes |
@@ -107,6 +109,8 @@ The cleanup in point 5 assumes one task at a time per ComfyUI server (ComfyUI's 
 ## 3. Workflows and models
 
 `workflows/` holds three examples (each renders the whole video, at most 30 s): MV from a photo and a song, motion copy, multi-shot story. Group ① holds the inputs an AI app should expose.
+
+Motion copy, for the app's description: the guide must be **one continuous shot** with no cuts inside; the camera may stand still or move. Empty scene = the guide's own surroundings (steadiest); a scene = a new setting, which with a moving camera can show a small jump where two windows hand over (the summary says so).
 
 | Node used by the workflows | From |
 |---|---|

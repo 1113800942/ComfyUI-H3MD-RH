@@ -213,7 +213,9 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
                 "image_2": ("IMAGE", {"tooltip": "motion_copy: full-body photo with the outfit (optional). "
                                       "动作复刻：全身照（可选）"}),
                 "audio": ("AUDIO", {"tooltip": "mv: the song. From Load Audio. MV：歌"}),
-                "video": ("VIDEO", {"tooltip": "motion_copy: the guide video. From Load Video. 动作复刻：原片"}),
+                "video": ("VIDEO", {"tooltip": "motion_copy: the guide video, ONE continuous shot (no cuts inside); the "
+                                    "camera may move. From Load Video. 动作复刻：原片，要是一个连续镜头（中间不要有剪辑），"
+                                    "镜头可以动"}),
                 "plan_json": ("STRING", {"multiline": True, "default": "", "tooltip":
                               "custom: an H3MD plan v1 JSON. 自定义计划"}),
                 "seamless": ("BOOLEAN", {"default": True, "tooltip":

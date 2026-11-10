@@ -26,7 +26,7 @@ BASE = {   # tested settings (drum TARA full run, 2026-11-05 / RH tests 2026-11-
 }
 
 
-VERSION = "0.4.3-rh2"
+VERSION = "0.4.4-rh1"
 
 
 class Graph:

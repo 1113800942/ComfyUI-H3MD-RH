@@ -8,7 +8,7 @@ For use on RunningHub only; on your own PC install ComfyUI-H3MD-Director instead
 
 | Node | What it does |
 |---|---|
-| H3MD Director RH | Template (mv / motion_copy / story / custom) + photo, song, guide video from ComfyUI's own Load Image / Load Audio / Load Video -> H3MD plan. At most 30 s and 1 MP. `seamless` (on): motion copy as one seamless take (CCW), segment by segment when off or when the core MiniMax H3 context windows are missing. Motion copy follows the guide's camera; empty `scene` keeps the guide's own surroundings (any guide: dance in place, running, tracking), a scene replaces them (the summary warns when the guide's camera moves) |
+| H3MD Director RH | Template (mv / motion_copy / story / custom) + photo, song, guide video from ComfyUI's own Load Image / Load Audio / Load Video -> H3MD plan. At most 30 s and 1 MP. `seamless` (on): motion copy as one seamless take (CCW), segment by segment when off or when the core MiniMax H3 context windows are missing. Motion copy needs a guide that is one continuous shot (no cuts) and follows its camera; empty `scene` keeps the guide's own surroundings (any guide: dance in place, running, tracking), a scene replaces them (the summary warns when the guide's camera moves) |
 | H3MD Loop Sampler RH | Generates the video. 8-bit cache in ComfyUI temp, leftovers of an earlier task removed first, temp disk checked before the run |
 | H3MD Save Video RH | Joins and saves the video (optional face refine / interpolation), deletes the cache after saving |
 | H3MD TARA RH | TARA temporal alignment for motion copy (from ComfyUI-BFSNodes by Alisson Anjos, GPL-3.0) |
