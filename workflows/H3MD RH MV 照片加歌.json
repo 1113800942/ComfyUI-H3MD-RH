@@ -156,7 +156,7 @@
     0.0,
     "",
     "",
-    false
+    true
    ],
    "title": "H3MD Director RH（填人物 / 场景；最长 30 秒、1 MP）"
   },
@@ -1168,7 +1168,7 @@
  "extra": {
   "h3md_rh": {
    "kind": "mv",
-   "version": "0.4.3-rh1"
+   "version": "0.4.3-rh2"
   }
  },
  "version": 0.4

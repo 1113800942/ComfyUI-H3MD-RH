@@ -5,10 +5,10 @@ Each template returns an H3MD plan v1 dict (see h3md_rh_core/h3md_director.py). 
 
   mv            photo + song -> hard-cut shots (medium close-ups / close-ups) that fill the length cap (30 s: 3 shots
                 of 226 frames = 9.4 s), the song locked as soundtrack, each shot at start + shot length * i seconds
-  motion_copy   guide video + face photo + full-body photo -> one long shot that copies the guide's motion
+  motion_copy   guide video + face photo + full-body photo -> one long shot that copies the guide's motion and camera
                 (TARA: global prompt "motion_transfer:", guide = <Video 1> encoded at short edge 480, its soundtrack
-                locked).  The Director
-                rounds the length down to 5+17n so it never runs past the clip end; autosplit cuts it into parts.
+                locked).  Empty scene = the guide's own surroundings; a scene = a new setting.  The Director
+                rounds the length down to 5+17n so it never runs past the clip end.
   story         photo + 1..8 shot lines -> one hard-cut shot per line, all shots shortened together to fit the
                 length cap (at least 4.5 s each; lines that do not fit are dropped and named in the summary)
 
@@ -158,11 +158,33 @@ def mv(who: str, scene: str, image_file: str, audio_file: str, music_start: floa
 
 
 # ------------------------------------------------------------------------------------------------- motion copy
+CAMERA_MOVES = 10.0     # 0.4.3-rh2: guide_camera_moves() score above this = the guide's camera moves.  Measured 11-09
+                        # (median change of the frame border over 2 s, 64x36 grey): tracking / moving 16-19, fixed
+                        # camera dances 2-6 (mina, Bubble Pop, cxk jump style, 11.mp4, 1-minute dance, Dancing-2)
+
+
+def camera_note(score: float, scene: str) -> str | None:
+    """Summary note when a new scene is asked for a guide whose camera moves (YJ 16:07: keep the scene, but say so)."""
+    if score is None or score < CAMERA_MOVES or not clean(scene):
+        return None
+    return (f"motion copy: the guide's camera moves (score {score:.0f}), so a new scene may jump where two windows "
+            f"hand over; for the steadiest result leave 'scene' empty to keep the guide's own surroundings. "
+            f"动作复刻：原片镜头在动，换成新场景时两个窗口交接处可能跳一下；想稳就把场景留空，用原片的景物。")
+
+
 def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, video_file: str,
                 video_seconds: float, max_seconds: float = 0.0, width: int = 704, height: int = 1024) -> dict:
-    """One long TARA shot.  Uses at most cap_seconds(max_seconds) of the guide (30 s; 0 = up to 30 s)."""
+    """One long TARA shot that copies the guide's motion.  Uses at most cap_seconds(max_seconds) of the guide.
+
+    0.4.3-rh2 (11-09): the camera moves exactly like the guide's (a locked-off guide gives a locked-off shot), so any
+    guide works - dancing in place, running past changing surroundings, a tracking or panning camera.
+      scene empty  -> the surroundings are the guide's own, passing by in its order and at its times (T1d: a tracking
+                      run joined cleanly at the window hand-over; the old 'locked-off, in <scene>, the place stays the
+                      same' prompt made the second window jump back to the scene words)
+      scene filled -> a new setting that moves past with the camera (YJ 16:07: kept even when the guide's camera moves;
+                      the Director adds a note then, see guide_camera_moves)"""
     who = clean(who, "a young woman with long dark hair, wearing a simple fitted dress")
-    scene = clean(scene, "a cozy living room at night, lit by warm, soft lamps")
+    scene = clean(scene)
     use = min(float(video_seconds), cap_seconds(max_seconds))
     length = frames_5_17n_down(use * FPS)
     images = ["face"] + (["body"] if body_file else [])
@@ -170,22 +192,36 @@ def motion_copy(who: str, scene: str, face_file: str, body_file: str | None, vid
             if body_file else "<Picture 1> defines the face, figure and outfit")
     ret = ("identity from <Picture 1>, figure and outfit from <Picture 2>" if body_file
            else "identity, figure and outfit from <Picture 1>")
+    if scene:
+        supplies = "the motion, poses, gestures, timing and the camera movement"
+        summary = (f"Transfer the performance of <Video 1> to <Subject 1>, preserving the action order, timing and "
+                   f"the camera movement of the guide, in a new setting: {scene}.")
+        keep = ("its motion, timing and camera movement are transferred to <Subject 1>; its setting is replaced by "
+                f"{scene}.")
+        place = (f"The setting is {scene}: as the camera moves, it passes by continuously as one place, in the same "
+                 "light from start to end; nothing in the background jumps, resets or repeats.")
+    else:
+        supplies = "the motion, poses, gestures, timing, the camera movement and the surroundings"
+        summary = ("Replace the person in <Video 1> with <Subject 1>, preserving the motion, timing, the camera "
+                   "movement and the surroundings of the guide exactly.")
+        keep = "its motion, timing, camera movement and surroundings are kept; only the person is replaced by <Subject 1>."
+        place = ("The surroundings are the ones in <Video 1> and pass by exactly as in <Video 1>, in the same order and "
+                 "at the same moments, as one continuous place; nothing in the background jumps, resets or repeats. "
+                 "The light stays the same.")
     prompt = (f"Duration: {length / FPS:.2f} s ({length} frames).\n\n"
               "subject_definitions:\n<Subject 1> is the person shown in " +
               ("<Picture 1> and <Picture 2>" if body_file else "<Picture 1>") + f": {pics}. <Subject 1> is {who}. "
-              "<Video 1> is the guide video: it supplies only the dance motion, poses, gestures, timing and camera "
-              "framing; nothing of the guide performer's face, hair, body or outfit is kept.\n"
-              "summary:\n[video generation + reference] Transfer the dance performance of <Video 1> to <Subject 1>, "
-              "preserving the action order, timing, beat accents and framing of the guide, in a new setting.\n"
+              f"<Video 1> is the guide video: it supplies {supplies}; nothing of the guide performer's face, hair, "
+              "body or outfit is kept.\n"
+              f"summary:\n[video generation + reference] {summary}\n"
               f"retention_analysis:\n<Subject 1>: fully_preserved - {ret}, identical in every moment. "
-              "<Video 1>: attribute_transfer - its motion and timing are transferred to <Subject 1>; its setting is "
-              "replaced.\n"
-              "detailed_description:\n[Shot 1] A locked-off shot matching the framing of <Video 1>. <Subject 1> "
-              "follows the guide's dance exactly: every arm swing, body movement, step, hand gesture, head movement "
-              "and expression in order and at matching times, each move landing on the beat. "
-              f"<Subject 1> dances in {scene}; the place and the light stay the same from start to end, and "
-              "<Subject 1> is the only person. The hands are empty with five natural fingers each. Do not copy the "
-              "reference pictures' still pose or backdrop as the motion or setting.\n"
+              f"<Video 1>: attribute_transfer - {keep}\n"
+              "detailed_description:\n[Shot 1] One continuous shot whose camera moves exactly like the camera of "
+              "<Video 1> (when the guide's camera stands still, it stands still). <Subject 1> moves exactly like the "
+              "person in <Video 1>: every step, arm swing, body movement, hand gesture, head turn and expression in "
+              f"order and at matching times. {place} <Subject 1> is the only person. The hands are empty with five "
+              "natural fingers each. Do not copy the reference pictures' still pose or backdrop as the motion or "
+              "setting.\n"
               "overall_soundscape:\nKeep the source soundtrack; do not invent dialogue.\n" + HIRES_TRIGGER + "\n\n"
               "non_diegetic_music:\nThe source song plays unchanged as the soundtrack.")
     media_images = [{"id": "face", "file": face_file}] + ([{"id": "body", "file": body_file}] if body_file else [])

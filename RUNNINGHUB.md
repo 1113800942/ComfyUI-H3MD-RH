@@ -1,4 +1,4 @@
-# H3MD RH 0.4.3-rh1 — 给 RunningHub 的说明 / Notes for RunningHub
+# H3MD RH 0.4.3-rh2 — 给 RunningHub 的说明 / Notes for RunningHub
 
 **中文在前，English below.**
 
@@ -8,7 +8,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| 包名 / 版本 | `ComfyUI-H3MD-RH` 0.4.3-rh1（引擎 = 主仓库 0.4.3，`h3md_rh_core/SYNC_FROM.txt` 记着来源 commit） |
+| 包名 / 版本 | `ComfyUI-H3MD-RH` 0.4.3-rh2（引擎 = 主仓库 0.4.3，`h3md_rh_core/SYNC_FROM.txt` 记着来源 commit） |
 | 节点 | 4 个，类名都以 RH 结尾，和任何版本的 ComfyUI-H3MD-Director、ComfyUI-BFSNodes 都不撞名：`H3MDDirectorRH`、`H3MDLoopSamplerRH`、`H3MDSaveVideoRH`、`H3MDTaraRH` |
 | 额外的 pip 包 | **没有**（只用 ComfyUI 自带的 torch、numpy、PyAV、Pillow、transformers） |
 | 前端 / 网页接口 | **没有**：不带 `WEB_DIRECTORY`（没有前端脚本），不注册任何 HTTP 路由 |
@@ -25,14 +25,14 @@
 | 4 | 出片就删 | Save RH 的 `delete_cache_after_save` **默认开**：视频文件完整写完、关闭、改好名以后，删除这一次的缓存文件夹；只删看起来是 H3MD 缓存的文件夹（`run_*` / `resume_*`，里面只有 `seg_*` 和这一次的 `run.json`），有别的文件就不删 | `h3md_rh_core/h3md_stream_save.py` `delete_cache_dir`；`h3md_face_refine_save.py`；`H3MDSaveVideoRH.save` | 日志 `[H3MD RH] video saved; segment cache: deleted after save` |
 | 5 | 不留垃圾 | ① 每次开跑前，Loop RH 先清空 `temp/h3md_rh_cache` 里上一次任务留下的东西（上次出错、没走到保存时会留）；② 照片、歌、参考视频的拷贝放在 `temp/h3md_rh_media`，每次 Director RH 运行时先删掉上一次的再写这一次的 | `clear_old_cache`、`clear_media` | 日志 `removed N leftover cache folder(s)`；测试 |
 | 6 | 不跨用户复用 | 每次运行一个单独的 `run_<时间>_<进程>` 文件夹。多人共用的 ComfyUI 上，"从缓存续跑" 默认关，不会拿到别人的分段 | `h3md_cache.py` `SegmentCache` | 日志 `shared ComfyUI: resume_from_cache off` |
-| 7 | 读文件的范围 | 只读 ComfyUI 的 input / output / temp。用户素材全部从核心 `LoadImage` / `LoadAudio` / `LoadVideo` 接进来（AI 应用能直接开放这些输入），Director RH 把它们存成 temp 里的文件再写进计划 | `h3md_rh_core/h3md_paths.py` `may_read`、`check_read`；`h3md_rh_nodes.py` `save_image` / `save_audio` / `save_video` | 计划里的文件路径都在 temp 里 |
+| 7 | 读文件的范围 | 只读 ComfyUI 的 input / output / temp。用户素材全部从核心 `LoadImage` / `LoadAudio` / `LoadVideo` 接进来（AI 应用能直接开放这些输入），Director RH 把它们存成 temp 里的文件再写进计划；动作复刻时再用 PyAV 读一遍 temp 里的原片（每秒 4 帧、64×36 灰度，只为判断镜头动没动） | `h3md_rh_core/h3md_paths.py` `may_read`、`check_read`；`h3md_rh_nodes.py` `save_image` / `save_audio` / `save_video` | 计划里的文件路径都在 temp 里 |
 | 8 | 写文件的范围 | 只写 ComfyUI 的 temp（缓存、素材拷贝）和 output（成片，文件名前缀 `H3MD_RH`） | `h3md_paths.py` `may_write`、`output_root` | — |
 | 9 | 时长封顶 | 整条视频**最多 30 秒**，三个模板都管：MV 放 3 个 9.4 秒的镜头；故事模板的镜头一起缩短（最短 4.5 秒，放不下的行去掉并在摘要里写明）；动作复刻最多用原片 30 秒。`custom` 模板的计划也查，超了直接报错 | `h3md_rh_templates.py`（`MAX_SECONDS`）；`h3md_rh_nodes.py` `check_limits` | 测试；Director 日志 `… frames (x s)` |
 | 10 | 分辨率封顶 | 每帧**最多 1 MP**（16:9 是 1344×768）。输入框最大 1.0，`custom` 计划超过也报错 | `MAX_MEGAPIXELS`、`check_limits` | 测试 |
 | 11 | 开跑前检查 | Loop RH 开跑前在日志里打出 ComfyUI 版本、显卡和显存、空闲内存、临时盘剩余，以及这一次估算要多少临时盘；**不够就在编码之前直接报错**（中英文），不会跑到一半爆盘 | `preflight` | 日志 `[H3MD RH] machine: …` |
 | 12 | 显存 | **目标：24 GB 显卡（4090）能跑。** 高清阶段按空闲显存自动切条；动作复刻的参考视频统一按短边 480 编码（1080p 参考视频在高清阶段会把 32 GB 卡占满）。11-09 实测：1 MP 动作复刻，把显存限制在约 24 GB（32 GB 卡留出 6 GB），12 秒成片一次跑完，用时 590 秒，高清阶段只切 1 条；MV 第一个镜头 9.4 秒，220 秒 | `h3md_rh_core/h3md_tiled_hires.py`、`h3md_window.py` | Loop 日志里每一遍的显存峰值（peak） |
 | 13 | 内存 | 无接缝模式一组的长度按机器内存自动定，解码分块（约 10 秒一块） | `h3md_window.py` `auto_group_length` | Director 摘要 `window mode: groups up to …` |
-| 14 | 无接缝开关 / 缺节点时 | 动作复刻的 `seamless`（接续窗口 CCW）**默认关**，按分段式出片：11-09 实测和 TARA 一起用时，两个窗口交接处还可能跳一下，修好之前不默认开。打开时要用 ComfyUI 核心的 `MiniMaxH3ContextWindows`；没有这个节点时 Director RH **自动改成分段式**，摘要里写一句，不报错，照样出片 | `core_windows_available` | 摘要 `rendered segment by segment instead` |
+| 14 | 无接缝开关 / 缺节点时 | 动作复刻的 `seamless`（接续窗口 CCW）**默认开**：11-09 实测固定机位的舞、跟拍的跑步（背景一直在变）在窗口交接处都接得上。要用 ComfyUI 核心的 `MiniMaxH3ContextWindows`；没有这个节点时 Director RH **自动改成分段式**，摘要里写一句，不报错，照样出片 | `core_windows_available` | 摘要 `rendered segment by segment instead` |
 | 15 | 任务时长 | 时长和分辨率都封顶，一次任务就是一条完整视频（工作流 `stop_after = 0`），不需要跨任务续跑 | 工作流 | — |
 | 16 | 不碰别人的东西 | 不改 ComfyUI 核心行为、不改别的节点；TARA 是 BFSNodes 节点的改名子类，不影响装在旁边的 BFSNodes | `h3md_rh_nodes.py` `_tara_class` | — |
 | 17 | 不执行外部程序 | 没有 subprocess、eval / exec、读环境变量。唯一的动态导入：TARA 内核在已经装了 `comfy_kitchen.temporal_attention` 时才用它 | `h3md_rh_tara/minimax_h3_temporal_kernel.py` | `grep` |
@@ -56,7 +56,7 @@ TARA 节点：RH 上没有 ComfyUI-BFSNodes 的 `BFSMiniMaxH3NativeTemporal`，�
 
 ## 四、怎么核对
 
-- 测试：`python tests/test_rh_load.py`（需要 ComfyUI 路径：`COMFYUI_ROOT`）。覆盖：30 秒和 1 MP 上限（含 custom 计划）、无接缝默认关、打开后缺节点时改分段、出片后删缓存（含 `run.json` 的文件夹）、强制 8 位、开跑前清旧缓存、临时盘不够时报错、素材拷贝只留这一次的。
+- 测试：`python tests/test_rh_load.py`（需要 ComfyUI 路径：`COMFYUI_ROOT`）。覆盖：30 秒和 1 MP 上限（含 custom 计划）、无接缝默认开、缺节点时改分段、动作复刻跟着原片的镜头和景物（场景留空）/ 换场景、原片镜头在动的检测和提醒、出片后删缓存（含 `run.json` 的文件夹）、强制 8 位、开跑前清旧缓存、临时盘不够时报错、素材拷贝只留这一次的。
 - 跑一次看日志：`[H3MD RH] machine: …`（机器和临时盘）→ `removed … leftover cache`（如果有）→ `template …: … frames (… s), …x…, seamless / segment by segment` → 保存后 `video saved; segment cache: deleted after save`。
 
 ## 五、联系
@@ -73,7 +73,7 @@ This pack is the RunningHub build of [H3MD Director](https://github.com/11138009
 
 | Item | Detail |
 |---|---|
-| Package / version | `ComfyUI-H3MD-RH` 0.4.3-rh1 (engine = main repo 0.4.3; source commit in `h3md_rh_core/SYNC_FROM.txt`) |
+| Package / version | `ComfyUI-H3MD-RH` 0.4.3-rh2 (engine = main repo 0.4.3; source commit in `h3md_rh_core/SYNC_FROM.txt`) |
 | Nodes | 4, all class names end in RH, so no clash with any ComfyUI-H3MD-Director or ComfyUI-BFSNodes: `H3MDDirectorRH`, `H3MDLoopSamplerRH`, `H3MDSaveVideoRH`, `H3MDTaraRH` |
 | Extra pip packages | **None** (only what ComfyUI ships: torch, numpy, PyAV, Pillow, transformers) |
 | Frontend / web API | **None**: no `WEB_DIRECTORY`, no HTTP routes |
@@ -90,14 +90,14 @@ This pack is the RunningHub build of [H3MD Director](https://github.com/11138009
 | 4 | Deleted after the video is saved | Save RH has `delete_cache_after_save` **on by default**: once the video file is fully written, closed and renamed, this run's cache folder is deleted; only folders that look like an H3MD cache (`run_*` / `resume_*` holding only `seg_*` and the run's `run.json`) are ever deleted; any other file there and the folder is kept | `h3md_rh_core/h3md_stream_save.py` `delete_cache_dir`; `h3md_face_refine_save.py`; `H3MDSaveVideoRH.save` | log `[H3MD RH] video saved; segment cache: deleted after save` |
 | 5 | Nothing left behind | ① Before each run Loop RH empties what an earlier task left in `temp/h3md_rh_cache` (e.g. a run that failed before saving); ② copies of the photo / song / guide video go to `temp/h3md_rh_media`, and Director RH removes the previous task's copies before writing this task's | `clear_old_cache`, `clear_media` | log `removed N leftover cache folder(s)`; tests |
 | 6 | No reuse across users | Every run gets its own `run_<time>_<pid>` folder. On a shared ComfyUI, resuming from an old cache is off, so nobody picks up someone else's segments | `h3md_cache.py` `SegmentCache` | log `shared ComfyUI: resume_from_cache off` |
-| 7 | Reads | Only ComfyUI's input / output / temp. All user media come in through the core `LoadImage` / `LoadAudio` / `LoadVideo` (so AI apps can expose them); Director RH saves them as files in temp and puts those into the plan | `h3md_rh_core/h3md_paths.py` `may_read`, `check_read`; `h3md_rh_nodes.py` `save_image` / `save_audio` / `save_video` | every media path in the plan is in temp |
+| 7 | Reads | Only ComfyUI's input / output / temp. All user media come in through the core `LoadImage` / `LoadAudio` / `LoadVideo` (so AI apps can expose them); Director RH saves them as files in temp and puts those into the plan; for motion copy it also reads that guide copy once with PyAV (4 frames a second, 64×36 grey, only to tell whether the camera moves) | `h3md_rh_core/h3md_paths.py` `may_read`, `check_read`; `h3md_rh_nodes.py` `save_image` / `save_audio` / `save_video` | every media path in the plan is in temp |
 | 8 | Writes | Only ComfyUI temp (cache, media copies) and output (the video, prefix `H3MD_RH`) | `h3md_paths.py` `may_write`, `output_root` | — |
 | 9 | Length cap | The whole video is **at most 30 s**, in every template: MV makes 3 shots of 9.4 s; story shortens all shots together (at least 4.5 s each; lines that do not fit are dropped and named in the summary); motion copy uses at most 30 s of the guide. A `custom` plan is checked too and refused when longer | `h3md_rh_templates.py` (`MAX_SECONDS`); `h3md_rh_nodes.py` `check_limits` | tests; Director log `… frames (x s)` |
 | 10 | Resolution cap | **At most 1 MP** a frame (1344×768 at 16:9). The input stops at 1.0; a larger `custom` plan is refused | `MAX_MEGAPIXELS`, `check_limits` | tests |
 | 11 | Check before running | Loop RH logs the ComfyUI version, GPU and VRAM, free RAM, free temp disk and how much temp disk this run needs; **when it will not fit, it stops with a clear message (Chinese + English) before anything is encoded**, instead of filling the disk half way | `preflight` | log `[H3MD RH] machine: …` |
 | 12 | VRAM | **Target: runs on a 24 GB card (4090).** The high-res pass is split into strips by the free VRAM; the motion-copy guide video is always encoded at short edge 480 (a 1080p guide filled a 32 GB card in the high-res pass). Measured 11-09: 1 MP motion copy with VRAM held to about 24 GB (6 GB reserved on a 32 GB card) rendered a 12 s video in one go, 590 s, high-res pass in 1 strip; one 9.4 s MV shot took 220 s | `h3md_rh_core/h3md_tiled_hires.py`, `h3md_window.py` | peak VRAM per pass in the Loop log |
 | 13 | RAM | In seamless mode the group length follows the machine's RAM; decoding is chunked (~10 s chunks) | `h3md_window.py` `auto_group_length` | Director summary `window mode: groups up to …` |
-| 14 | Seamless switch / missing node | Motion copy's `seamless` (CCW, chained context windows) is **off by default**, so it renders segment by segment: in the 11-09 test with TARA a jump could still show where two windows hand over; it stays off until that is fixed. When switched on it builds on ComfyUI's core `MiniMaxH3ContextWindows`; without it, Director RH **falls back to segment-by-segment by itself**, says so in the summary, no error | `core_windows_available` | summary `rendered segment by segment instead` |
+| 14 | Seamless switch / missing node | Motion copy's `seamless` (CCW, chained context windows) is **on by default**: measured 11-09, a fixed-camera dance and a tracking run (background changing all the time) both join cleanly where two windows hand over. It builds on ComfyUI's core `MiniMaxH3ContextWindows`; without it, Director RH **falls back to segment-by-segment by itself**, says so in the summary, no error | `core_windows_available` | summary `rendered segment by segment instead` |
 | 15 | Task time | Length and resolution are capped, so one task = one whole video (workflows use `stop_after = 0`); no resume across tasks needed | workflows | — |
 | 16 | Leaves others alone | Does not change ComfyUI core behaviour or other nodes; TARA is a renamed subclass of the BFSNodes node and does not touch a BFSNodes installed next to it | `h3md_rh_nodes.py` `_tara_class` | — |
 | 17 | No external programs | No subprocess, eval / exec or environment variables. The only dynamic import: the TARA kernel uses `comfy_kitchen.temporal_attention` only when it is already installed | `h3md_rh_tara/minimax_h3_temporal_kernel.py` | `grep` |
@@ -121,7 +121,7 @@ TARA node: RH does not have ComfyUI-BFSNodes' `BFSMiniMaxH3NativeTemporal`, so i
 
 ## 4. How to check
 
-- Tests: `python tests/test_rh_load.py` (ComfyUI path in `COMFYUI_ROOT`). Covers: 30 s and 1 MP limits (custom plans too), seamless off by default and the fallback without the core node when on, deleting the cache after saving (folders holding `run.json` too), forced 8-bit cache, clearing leftovers before a run, the clear error when temp disk is short, only this task's media copies kept.
+- Tests: `python tests/test_rh_load.py` (ComfyUI path in `COMFYUI_ROOT`). Covers: 30 s and 1 MP limits (custom plans too), seamless on by default and the fallback without the core node, motion copy following the guide's camera and surroundings (empty scene) / a new scene, the guide camera check and its note, deleting the cache after saving (folders holding `run.json` too), forced 8-bit cache, clearing leftovers before a run, the clear error when temp disk is short, only this task's media copies kept.
 - One run, in the log: `[H3MD RH] machine: …` (machine and temp disk) → `removed … leftover cache` (if any) → `template …: … frames (… s), …x…, seamless / segment by segment` → after saving `video saved; segment cache: deleted after save`.
 
 ## 5. Contact

@@ -142,6 +142,39 @@ def video_size(path: str):
         return None
 
 
+
+def guide_camera_moves(path: str, seconds: float = None, fps: float = 4.0, lag_s: float = 2.0):
+    """How much the guide's camera moves: the median change of the frame border (outer sixth on the left / right,
+    top sixth) between frames 2 s apart, 64x36 grey, median over time.  The person in the middle, or an arm crossing
+    the border, moves only part of it; a moving camera changes all of it.  Measured 11-09: tracking / moving cameras
+    16-19, fixed-camera dances 2-6 (threshold T.CAMERA_MOVES = 10).  PyAV only (no external program).  None when the
+    clip cannot be read or is shorter than 2 s."""
+    try:
+        import av
+        frames, step, nxt = [], 1.0 / fps, 0.0
+        with av.open(path) as c:
+            st = c.streams.video[0]
+            st.thread_type = "AUTO"
+            for fr in c.decode(st):
+                t = float(fr.time or 0.0)
+                if seconds and t > float(seconds):
+                    break
+                if t + 1e-6 < nxt:
+                    continue
+                nxt = t + step
+                frames.append(fr.to_ndarray(format="gray", width=64, height=36).astype(np.float32))
+        lag = int(round(lag_s * fps))
+        if len(frames) <= lag:
+            return None
+        a = np.stack(frames)
+        m = np.zeros(a.shape[1:], bool)
+        m[:, :64 // 6] = m[:, -(64 // 6):] = m[:36 // 6, :] = True
+        d = np.abs(a[lag:] - a[:-lag])[:, m]
+        return float(np.median(np.median(d, axis=1)))
+    except Exception as exc:
+        LOG.info("%s guide camera check skipped: %s", _TAG, exc)
+        return None
+
 # ------------------------------------------------------------------------------------------------- Director
 class H3MDDirectorRH(R.H3MDDirectorRefMod):
     @classmethod
@@ -155,8 +188,12 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
                 "who": ("STRING", {"multiline": True, "default": "a young woman with long dark hair, wearing a "
                                    "white summer dress", "tooltip": "Person: look + clothes (English works best). "
                                    "人物：外貌+服装（英文效果最好）"}),
-                "scene": ("STRING", {"multiline": True, "default": "a sunny beach with soft waves",
-                                     "tooltip": "Where it happens. 场景"}),
+                "scene": ("STRING", {"multiline": True, "default": "", "tooltip":
+                          "Where it happens (empty: mv uses a sunny beach). motion_copy: leave EMPTY to keep the guide "
+                          "video's own surroundings (steadiest, any guide); a scene replaces them - with a guide whose "
+                          "camera moves this can jump where two windows hand over (the summary says so).\n"
+                          "场景（留空：MV 用晴天海滩）。动作复刻：留空 = 用原片的景物（最稳，什么原片都行）；填了 = 换成新场景，"
+                          "原片镜头在动时两个窗口交接处可能跳（摘要里会提醒）"}),
                 "aspect": (T.ASPECTS, {"default": "16:9", "tooltip": "Picture shape; 'follow video' = the guide "
                                        "video's shape (motion copy). 画面比例"}),
                 "megapixels": ("FLOAT", {"default": 1.0, "min": 0.3, "max": T.MAX_MEGAPIXELS, "step": 0.05,
@@ -179,13 +216,12 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
                 "video": ("VIDEO", {"tooltip": "motion_copy: the guide video. From Load Video. 动作复刻：原片"}),
                 "plan_json": ("STRING", {"multiline": True, "default": "", "tooltip":
                               "custom: an H3MD plan v1 JSON. 自定义计划"}),
-                "seamless": ("BOOLEAN", {"default": False, "tooltip":
+                "seamless": ("BOOLEAN", {"default": True, "tooltip":
                              "motion_copy: render the whole shot as one seamless take (CCW context windows, needs the "
-                             "core MiniMax H3 context windows; without them it falls back to segments by itself). Off by "
-                             "default: with TARA a jump can still show where two windows hand over (11-09 test). "
-                             "mv / story are hard cuts and are not affected. "
-                             "动作复刻：整段无接缝（接续窗口 CCW）。默认关：和 TARA 一起用时，两个窗口交接处还可能跳一下"
-                             "（11-09 实测）。MV、故事不受影响"}),
+                             "core MiniMax H3 context windows; without them it falls back to segments by itself). "
+                             "Tested 11-09 with a fixed-camera dance and a tracking run. mv / story are hard cuts and are "
+                             "not affected. 动作复刻：整段无接缝（接续窗口 CCW），固定机位的舞和跟拍的跑步都测过"
+                             "（11-09）。MV、故事不受影响"}),
             },
         }
 
@@ -202,7 +238,7 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
 
     @staticmethod
     def make_plan(template, who, scene, aspect, megapixels, music_start, max_seconds, shots,
-                  image=None, image_2=None, audio=None, video=None, plan_json="", seamless=False):
+                  image=None, image_2=None, audio=None, video=None, plan_json="", seamless=True):
         raw = H3MDDirectorRH._template_plan(template, who, scene, aspect, megapixels, music_start, max_seconds,
                                             shots, image, image_2, audio, video, plan_json)
         notes = list(raw.pop(T.NOTES_KEY, None) or [])
@@ -242,14 +278,22 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
                 raise ValueError(f"{_TAG} cannot read the guide video. 原片读不出来。")
             w, h = T.size_for(aspect, megapixels, video_size(vid))
             body = save_image(image_2, "body") if image_2 is not None else None
-            return T.motion_copy(who, scene, img, body, vid, seconds, max_seconds, w, h)
+            plan = T.motion_copy(who, scene, img, body, vid, seconds, max_seconds, w, h)
+            moves = guide_camera_moves(vid, min(float(seconds), T.cap_seconds(max_seconds)))
+            LOG.info("%s motion copy: guide camera score %s (moves above %.0f), %s", _TAG,
+                     "n/a" if moves is None else f"{moves:.1f}", T.CAMERA_MOVES,
+                     "new scene" if T.clean(scene) else "the guide's own surroundings")
+            note = T.camera_note(moves, scene)
+            if note:
+                plan[T.NOTES_KEY] = list(plan.get(T.NOTES_KEY) or []) + [note]
+            return plan
         if template == "story":
             w, h = T.size_for(aspect, megapixels)
             return T.story(who, scene, shots, img, w, h, max_seconds)
         raise ValueError(f"{_TAG} unknown template {template!r}")
 
     def build_rh(self, template, who, scene, aspect, megapixels, music_start, max_seconds, shots,
-                 image=None, image_2=None, audio=None, video=None, plan_json="", seamless=False):
+                 image=None, image_2=None, audio=None, video=None, plan_json="", seamless=True):
         raw = self.make_plan(template, who, scene, aspect, megapixels, music_start, max_seconds, shots,
                              image, image_2, audio, video, plan_json, seamless)
         notes = list(raw.pop(T.NOTES_KEY, None) or [])

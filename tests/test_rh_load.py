@@ -52,7 +52,7 @@ class V:
     def get_stream_source(self): return vp
 plan, n, total, summ, info, text = d.build_rh("motion_copy", image=img, image_2=img, video=V(),
                                               **dict(base, aspect="follow video"))
-assert not plan.get("windowMode"), "seamless is off by default (11-09: TARA + windows still jump at the hand-over)"
+assert plan.get("windowMode"), "rh2: seamless is on by default (11-09 T1c fixed camera + T1d tracking run joined cleanly)"
 raw = json.loads(text)
 print("motion_copy", n, total, plan["width"], plan["height"], raw["segments"][0]["length"], summ.splitlines()[:3])
 assert raw["segments"][0]["length"] == 175 and (total - 5) % 17 == 0 and total <= 180
@@ -96,6 +96,39 @@ finally:
     N.core_windows_available = _real
 assert not plan_fb.get("windowMode") and "segment by segment" in summ_fb, summ_fb[:200]
 print("seamless ok: on -> window mode, off / no core node -> segments")
+
+# rh2 (11-09): motion copy follows the guide's camera; empty scene = the guide's own surroundings; a new scene with a
+# guide whose camera moves gets a note (YJ 16:07: keep the scene, say so)
+assert N.H3MDDirectorRH.INPUT_TYPES()["required"]["scene"][1]["default"] == ""
+assert N.H3MDDirectorRH.INPUT_TYPES()["optional"]["seamless"][1]["default"] is True
+def mc_prompt(r): return r["segments"][0]["prompt"]
+plan, n, total, summ, info, text = d.build_rh("motion_copy", image=img, image_2=img, video=V(),
+                                              **dict(base, aspect="follow video", scene=""))
+pr = mc_prompt(json.loads(text))
+assert "locked-off" not in pr and "dances in" not in pr and "stay the same from start to end" not in pr, pr
+assert "surroundings are the ones in <Video 1>" in pr and "camera moves exactly like the camera of <Video 1>" in pr
+assert "camera moves" not in summ.split("H3MD plan")[0], summ[:300]          # empty scene: no note
+plan, n, total, summ, info, text = d.build_rh("motion_copy", image=img, image_2=img, video=V(),
+                                              **dict(base, aspect="follow video", scene="a rooftop at sunset"))
+pr = mc_prompt(json.loads(text))
+assert "The setting is a rooftop at sunset" in pr and "its setting is replaced by a rooftop at sunset" in pr
+assert "surroundings are the ones in <Video 1>" not in pr
+score = N.guide_camera_moves(vp)
+assert score is not None and score > T.CAMERA_MOVES, score     # the test guide changes every pixel every frame
+assert "the guide's camera moves" in summ and "原片镜头在动" in summ, summ[:400]
+# a fixed camera: still border, something moving in the middle -> low score, no note even with a scene
+vp2 = os.path.join(tempfile.mkdtemp(), "still.mp4")
+with av.open(vp2, "w") as c:
+    s2 = c.add_stream("libx264", rate=24); s2.width, s2.height, s2.pix_fmt = 384, 216, "yuv420p"
+    bg = np.tile(np.linspace(40, 200, 384, dtype=np.uint8)[None, :, None], (216, 1, 3))
+    for i in range(24 * 6):
+        f = bg.copy(); x = 120 + int(60 * math.sin(i / 5)); f[60:160, x:x + 60] = 255 - (i * 7) % 255
+        for p in s2.encode(av.VideoFrame.from_ndarray(f, format="rgb24")): c.mux(p)
+    for p in s2.encode(): c.mux(p)
+score2 = N.guide_camera_moves(vp2)
+assert score2 is not None and score2 < T.CAMERA_MOVES, score2
+assert T.camera_note(score2, "a rooftop") is None and T.camera_note(score, "") is None and T.camera_note(None, "x") is None
+print(f"rh2 motion copy ok: follow / new scene prompts, camera score moving {score:.0f} still {score2:.0f}, note only when moving + scene")
 
 # Loop RH: 8-bit cache forced, leftover cache removed, temp disk checked before the run
 LS = sys.modules["h3md_rh.h3md_rh_core.h3md_loop_split"]

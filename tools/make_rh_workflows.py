@@ -26,7 +26,7 @@ BASE = {   # tested settings (drum TARA full run, 2026-11-05 / RH tests 2026-11-
 }
 
 
-VERSION = "0.4.3-rh1"
+VERSION = "0.4.3-rh2"
 
 
 class Graph:
@@ -113,7 +113,7 @@ def build(info, kind, inputs):
     director = g.add("H3MDDirectorRH", (X0 + 360, Y0), {
         "template": kind, "who": inputs["who"], "scene": inputs["scene"], "aspect": inputs["aspect"],
         "megapixels": 1.0, "music_start": inputs.get("music_start", 0.0), "max_seconds": inputs.get("max_seconds", 0.0),
-        "shots": inputs.get("shots", ""), "seamless": False},
+        "shots": inputs.get("shots", ""), "seamless": True},
         "H3MD Director RH（填人物 / 场景；最长 30 秒、1 MP）", (420, 660))
     g.link(img, 0, director, "image")
     if img2:
@@ -193,7 +193,7 @@ DEMOS = {
                scene="a sunny tropical beach with turquoise water and soft waves", stop_after=0),
     "motion_copy": dict(image="face.png", image_2="full.png", video="guide.mp4", aspect="follow video",
                         max_seconds=0.0, who="a young woman, wearing the outfit shown in the photo",
-                        scene="a bright rooftop terrace at sunset", stop_after=0),
+                        scene="", stop_after=0),   # empty = the guide's own surroundings (rh2)
     "story": dict(image="eve_meadow_full.png", aspect="16:9",
                   who="a young East Asian woman with long dark hair, wearing the same outfit as in the photo",
                   scene="a quiet seaside town in the morning",
