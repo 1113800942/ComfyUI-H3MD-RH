@@ -1,2 +1,2 @@
-main version 0.4.4
-main commit af4c716fbb2eaba59de5082a010d9f6db43b4270 v0.4.4: the save step really deletes the run cache; prompt skill writes motion copy as the guide really is
+main version 0.5.5
+main source E:/comfyui_dev/h3md director_dev/window_exp/ComfyUI-H3MD-Director_0.5.5 (= release zip ComfyUI-H3MD-Director_v0.5.5.zip, 2026-11-18)

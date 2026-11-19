@@ -20,6 +20,8 @@ CORE = [
     "h3md_seam.py", "h3md_semantic_bridge.py", "h3md_stream_save.py", "h3md_tiled_hires.py", "h3md_vram.py",
     "h3md_control_panel.py", "h3md_video_preview.py",
     "h3md_window.py", "h3md_progress.py",          # 0.4: CCW window mode + per-step progress cache
+    "h3md_remake_engine.py", "h3md_plan_io.py",    # 0.5: Remake multi-person swap + plan zip format (routes stay off:
+    "h3md_face_redraw.py",                         #      plan_io.register() is only called by the main __init__)
 ]
 CORE_DIRS = ["h3md_luna"]
 # import-time route registration -> disabled in the RH build

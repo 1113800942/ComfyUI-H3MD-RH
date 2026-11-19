@@ -15,7 +15,7 @@ rh = load("h3md_rh", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 clash = set(main.NODE_CLASS_MAPPINGS) & set(rh.NODE_CLASS_MAPPINGS)
 print("main nodes", len(main.NODE_CLASS_MAPPINGS), "rh nodes", sorted(rh.NODE_CLASS_MAPPINGS))
 assert not clash, clash
-assert set(rh.NODE_CLASS_MAPPINGS) == {"H3MDDirectorRH", "H3MDLoopSamplerRH", "H3MDSaveVideoRH", "H3MDTaraRH"}
+assert set(rh.NODE_CLASS_MAPPINGS) == {"H3MDDirectorRH", "H3MDLoopSamplerRH", "H3MDSaveVideoRH", "H3MDTaraRH", "H3MDPlanImportRH"}
 for k, c in rh.NODE_CLASS_MAPPINGS.items():
     c.INPUT_TYPES()
 

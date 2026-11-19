@@ -316,13 +316,26 @@ class H3MDDirectorRH(R.H3MDDirectorRefMod):
 MAX_PIXELS = int(T.MAX_MEGAPIXELS * 1_050_000)    # 1 MP + 5 %: sizes snap to multiples of 64 (1344x768 = 1.03 MP)
 
 
+# 0.5.5-rh1: Remake (multi-person swap) only runs at these sizes; 1664x960 / 960x1664 are allowed on RH even though
+# they are over 1 MP (2560x1472 is not: too much VRAM / temp disk for an RH task).
+SWAP_SIZES = ((1664, 960), (960, 1664))
+
+
+def is_swap(plan: dict) -> bool:
+    return str(plan.get("swapEngine") or "").strip().lower() == "remake"
+
+
 def check_limits(plan: dict, total: int) -> None:
-    """RunningHub limits for every plan (templates and custom plan_json): at most 30 s, at most 1 MP a frame."""
+    """RunningHub limits for every plan (templates, custom plan_json, imported plans): at most 30 s; at most 1 MP a
+    frame, except a multi-person swap plan at 1664x960 / 960x1664 (the Remake sizes)."""
     if total > T.cap_frames(0) + 1:
         raise ValueError(f"{_TAG} the video is {total / T.FPS:.1f} s, over the {T.MAX_SECONDS:g} s limit of this "
                          f"build. 视频 {total / T.FPS:.1f} 秒，超过本版 {T.MAX_SECONDS:g} 秒的上限。")
     w, h = int(plan.get("width") or 0), int(plan.get("height") or 0)
-    if w * h > MAX_PIXELS:
+    if is_swap(plan) and (w, h) not in SWAP_SIZES:
+        raise ValueError(f"{_TAG} a multi-person swap plan must be 1664x960 or 960x1664 on RunningHub (got {w}x{h}). "
+                         f"多人换人计划在 RH 上只能是 1664x960 或 960x1664（现在是 {w}x{h}）。")
+    if w * h > MAX_PIXELS and not (is_swap(plan) and (w, h) in SWAP_SIZES):
         raise ValueError(f"{_TAG} {w}x{h} is over the {T.MAX_MEGAPIXELS:g} MP limit of this build. "
                          f"{w}x{h} 超过本版 {T.MAX_MEGAPIXELS:g} 百万像素的上限。")
 
@@ -334,6 +347,256 @@ def core_windows_available() -> bool:
         return True
     except Exception:
         return False
+
+
+# ------------------------------------------------------------------------------------------- Plan Import
+# 0.5.5-rh1.  On RunningHub a plan zip is uploaded with RH's own "Load Images From Zip V2" (RHUploadZip_V2): RH stores
+# the zip and unpacks it to input/zip_extracts/<hash>/ on the machine that runs the task (tested 2026-11-18), and an
+# AI app can expose its upload box.  This node reads that folder - no web route, no front-end script.  (The main
+# pack's "Import plan..." button does not work on RH: it unpacks on the web machine, which the task machine never
+# sees - the pictures came up blank.)
+PLAN_NAME = "plan.json"
+SOURCE_TOL_S = 0.1                 # an uploaded source must match the plan's source length within this
+MAX_PREVIEW = 16
+
+
+def find_plan_file(folder: str) -> str:
+    """plan.json at the top of the unpacked zip, or the only one below it (a zip of a folder)."""
+    top = os.path.join(folder, PLAN_NAME)
+    if os.path.isfile(top):
+        return top
+    found = []
+    for root, _dirs, files in os.walk(folder):
+        if PLAN_NAME in files:
+            found.append(os.path.join(root, PLAN_NAME))
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise ValueError(f"{_TAG} no plan.json in the uploaded zip - export the plan from H3MD Director "
+                         f"('Export plan + media') and upload that zip. 上传的 zip 里没有 plan.json，请用导演台的"
+                         f"「Export plan + media」导出计划包再上传。")
+    raise ValueError(f"{_TAG} the zip holds {len(found)} plan.json files - upload one plan at a time. "
+                     f"zip 里有 {len(found)} 个 plan.json，一次只传一个计划包。")
+
+
+def _index_files(folder: str) -> dict:
+    """lower-case base name -> path, for every media file in the unpacked zip (first one wins)."""
+    from .h3md_rh_core import h3md_plan_io as PIO
+    out = {}
+    for root, _dirs, files in os.walk(folder):
+        for name in sorted(files):
+            if name.lower().endswith(PIO.MEDIA_EXTS):
+                out.setdefault(name.lower(), os.path.join(root, name))
+    return out
+
+
+def relink_media(plan: dict, folder: str) -> list:
+    """Point every media file of the plan at its copy in the unpacked zip (matched by file name, like the main
+    pack's import).  Returns the files that are not in the zip."""
+    have = _index_files(folder)
+    missing = []
+    for kind in ("images", "videos", "audios"):
+        for it in (plan.get("media") or {}).get(kind) or []:
+            if not isinstance(it, dict) or not it.get("file"):
+                continue
+            base = os.path.basename(str(it["file"]).replace("\\", "/")).lower()
+            if base in have:
+                it["file"] = have[base]
+            else:
+                missing.append((kind, str(it.get("id") or ""), str(it["file"])))
+    return missing
+
+
+def source_entry(plan: dict):
+    """The plan's source video (the one an uploaded video replaces): the only video, else id 'src', else the video
+    the locked soundtrack comes from.  None when the plan has no video."""
+    vids = [v for v in (plan.get("media") or {}).get("videos") or [] if isinstance(v, dict)]
+    if not vids:
+        return None
+    if len(vids) == 1:
+        return vids[0]
+    by_id = {str(v.get("id")): v for v in vids}
+    if "src" in by_id:
+        return by_id["src"]
+    for s in plan.get("segments") or []:
+        src = str(((s or {}).get("locked") or {}).get("source") or "")
+        if src.startswith("video:") and src[6:] in by_id:
+            return by_id[src[6:]]
+    raise ValueError(f"{_TAG} the plan has {len(vids)} videos and none is marked as the source (id 'src') - "
+                     f"leave 'video' unconnected so the zip's own videos are used. 计划里有 {len(vids)} 个视频，"
+                     f"分不出哪个是原片；请不要接 video，直接用计划包里的视频。")
+
+
+def plan_source_seconds(plan: dict, entry: dict):
+    if entry.get("duration"):
+        return float(entry["duration"])
+    vid = str(entry.get("id"))
+    uses = [float(v.get("useDuration")) for s in plan.get("segments") or [] for v in (s or {}).get("videos") or []
+            if isinstance(v, dict) and str(v.get("id")) == vid and v.get("useDuration")]
+    return max(uses) if uses else None
+
+
+def resolve_trim(plan: dict, start_s: float, end_s: float, uploaded_s, wanted_s):
+    """(start, end) to cut from the uploaded video, or None to use it as it is.
+    - start_s / end_s on the node win when either is set;
+    - else an uploaded clip that already has the plan's length is used as it is (the user uploaded the cut part);
+    - else the plan's sourceTrim (written by H3MD Keyframe 1: Prepare from main 0.5.6);
+    - else as it is (the plan used the whole source)."""
+    start_s, end_s = max(0.0, float(start_s or 0.0)), max(0.0, float(end_s or 0.0))
+    if start_s or end_s:
+        return start_s, end_s
+    if wanted_s and uploaded_s and abs(uploaded_s - wanted_s) <= SOURCE_TOL_S:
+        return None
+    st = plan.get("sourceTrim")
+    if isinstance(st, dict) and (st.get("start") or st.get("end")):
+        return max(0.0, float(st.get("start") or 0.0)), max(0.0, float(st.get("end") or 0.0))
+    return None
+
+
+def cut_video(video, start_s: float, end_s: float, tag: str = "source") -> str:
+    """Core VIDEO -> the part start_s .. end_s (0 = to the end) as a file in temp/h3md_rh_media."""
+    if end_s and end_s <= start_s:
+        raise ValueError(f"{_TAG} end_s ({end_s:g}) must be after start_s ({start_s:g}), or 0 for the end. "
+                         f"end_s 要大于 start_s，或填 0 表示到结尾。")
+    if not hasattr(video, "as_trimmed"):
+        raise ValueError(f"{_TAG} cutting a part of the video needs a newer ComfyUI (Trim Video). Upload the cut part "
+                         f"instead. 截取需要较新的 ComfyUI；请直接上传截好的那一段。")
+    part = video.as_trimmed(start_s, (end_s - start_s) if end_s else 0.0)
+    if part is None:
+        raise ValueError(f"{_TAG} could not cut {start_s:g}-{end_s or 'end'} s from the video. "
+                         f"原片截不出 {start_s:g}-{end_s or '结尾'} 秒这一段。")
+    # not save_video(): a trimmed VideoFromFile still reports the whole original as its stream source, so a plain
+    # file copy would keep the whole clip; save_to() writes only the trimmed part
+    tmp = os.path.join(_media_dir(), f"{tag}_cut_incoming.mp4")
+    part.save_to(tmp)
+    path = os.path.join(_media_dir(), f"{tag}_{start_s:g}-{end_s:g}s_{_file_digest(tmp)}.mp4")
+    os.replace(tmp, path)
+    return path
+
+
+def load_preview(paths: list):
+    """Pictures -> IMAGE batch [N,H,W,3] at the first picture's size (for a Preview Image node)."""
+    import torch
+    from PIL import Image
+    frames, size = [], None
+    for p in paths[:MAX_PREVIEW]:
+        try:
+            im = Image.open(p).convert("RGB")
+        except Exception as exc:
+            LOG.warning("%s preview skipped %s: %s", _TAG, os.path.basename(p), exc)
+            continue
+        size = size or im.size
+        if im.size != size:
+            im = im.resize(size, Image.LANCZOS)
+        frames.append(np.asarray(im, dtype=np.float32) / 255.0)
+    if not frames:
+        return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+    return torch.from_numpy(np.stack(frames))
+
+
+class H3MDPlanImportRH(R.H3MDDirectorRefMod):
+    """Uploaded H3MD plan zip (+ optional source video) -> H3MD plan, checked against the RH limits."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "folder_path": ("STRING", {"forceInput": True, "tooltip":
+                                "Connect 'folder_path' of RunningHub's Load Images From Zip V2 (RHUploadZip_V2), "
+                                "where the plan zip is uploaded. 接 RH「Load Images From Zip V2」的 folder_path（在那里上传计划包 zip）"}),
+            },
+            "optional": {
+                "video": ("VIDEO", {"tooltip":
+                          "The source video (Load Video). Replaces the plan's source; leave unconnected to use the "
+                          "video inside the zip. The whole original is fine: the part the keyframes were made from is "
+                          "cut by itself (the plan's sourceTrim, or start_s / end_s). 原片（加载视频）。会替换计划里的原片；"
+                          "不接就用 zip 里的。传整条原片也行，会自动截出做关键帧的那一段"}),
+                "start_s": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1, "tooltip":
+                            "Cut the uploaded video from this second (0 and end_s 0 = automatic: the plan's sourceTrim, "
+                            "or the video as it is). 原片从第几秒截（和 end_s 都是 0 = 自动）"}),
+                "end_s": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1, "tooltip":
+                          "... to this second (0 = to the end). 截到第几秒（0 = 到结尾）"}),
+                "global_prompt": ("STRING", {"multiline": True, "default": "", "tooltip":
+                                  "Optional: trigger words / style for every shot. Empty = keep the plan's own. "
+                                  "可选：每个镜头都加的触发词/风格；留空 = 用计划自己的"}),
+            },
+        }
+
+    RETURN_TYPES = (D.PLAN_TYPE, "INT", "INT", "STRING", "STRING", "IMAGE")
+    RETURN_NAMES = ("plan", "segment_count", "total_frames", "summary", "plan_info", "keyframes")
+    FUNCTION = "import_rh"
+    CATEGORY = CATEGORY
+    DESCRIPTION = ("H3MD Plan Import for RunningHub: upload a plan zip made on your own PC (keyframes, prompts, "
+                   "settings) with RH's Load Images From Zip V2, connect its folder_path here, optionally the source "
+                   "video from Load Video. Connect 'plan' to H3MD Loop Sampler RH, 'keyframes' to Preview Image.")
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return ""
+
+    def import_rh(self, folder_path, video=None, start_s=0.0, end_s=0.0, global_prompt=""):
+        from .h3md_rh_core import h3md_paths as PATHS
+        from .h3md_rh_core import h3md_plan_io as PIO
+        folder = str(folder_path or "").strip().strip('"')
+        if not folder or not os.path.isdir(folder):
+            raise ValueError(f"{_TAG} the plan zip is not there ({folder or 'empty'}): upload it in Load Images From "
+                             f"Zip V2 first. 找不到计划包（{folder or '空'}）：请先在 Load Images From Zip V2 上传。")
+        PATHS.check_read(folder)
+        with open(PATHS.check_read(find_plan_file(folder)), encoding="utf-8-sig") as f:
+            plan = PIO._load_plan(f.read())
+        notes = []
+        missing = relink_media(plan, folder)
+        src = source_entry(plan)
+        if video is not None:
+            if src is None:
+                raise ValueError(f"{_TAG} this plan has no source video, so the uploaded video has nowhere to go - "
+                                 f"leave 'video' unconnected. 这个计划没有原片，请不要接 video。")
+            clear_media()
+            wanted = plan_source_seconds(plan, src)
+            path = save_video(video, "source")
+            got = D.video_stream_seconds(path)
+            trim = resolve_trim(plan, start_s, end_s, got, wanted)
+            if trim:
+                path = cut_video(video, trim[0], trim[1])
+                got = D.video_stream_seconds(path)
+                notes.append(f"source video: cut {trim[0]:g}-{trim[1] or 'end'} s of the uploaded video")
+            if wanted and got and abs(got - wanted) > SOURCE_TOL_S:
+                raise ValueError(
+                    f"{_TAG} the source video does not match the plan: it is {got:.2f} s, the keyframes were made on "
+                    f"{wanted:.2f} s. Upload the same part, or set start_s / end_s to the part you cut on your PC. "
+                    f"原片对不上：现在是 {got:.2f} 秒，关键帧是在 {wanted:.2f} 秒的片段上做的。请上传同一段，"
+                    f"或把 start_s / end_s 填成你在本地截的那一段。")
+            src["file"] = path
+            missing = [m for m in missing if not (m[0] == "videos" and m[1] == str(src.get("id")))]
+        if missing:
+            names = ", ".join(f"{os.path.basename(m[2])} ({m[0][:-1]} {m[1]})" for m in missing)
+            raise ValueError(f"{_TAG} not in the zip: {names}. Export with 'Export plan + media'"
+                             f"{' or connect the source video' if any(m[0] == 'videos' for m in missing) else ''}. "
+                             f"zip 里缺这些文件：{names}。请用「Export plan + media」导出"
+                             f"{'，或接上原片' if any(m[0] == 'videos' for m in missing) else ''}。")
+        if str(global_prompt or "").strip():
+            plan["globalPrompt"] = str(global_prompt).strip()
+        if is_swap(plan):
+            w, h = int(plan.get("width") or 0), int(plan.get("height") or 0)
+            if (w, h) not in SWAP_SIZES:
+                nw, nh = (960, 1664) if h > w else (1664, 960)
+                notes.append(f"multi-person swap: {w}x{h} -> {nw}x{nh} (the Remake size allowed on RunningHub)")
+                plan["width"], plan["height"] = nw, nh
+        problems = [p for p in PIO.check_plan(plan) if not p.startswith("missing file")]
+        if problems:
+            notes += [f"check: {p}" for p in problems]
+        for n in notes:
+            LOG.warning("%s %s", _TAG, n)
+        out, count, total, summary, info = self.build_refmod(json.dumps(plan, ensure_ascii=False))
+        check_limits(out, total)
+        if notes:
+            summary = "\n".join(notes) + "\n" + summary
+        pics = [str(it["file"]) for it in (plan.get("media") or {}).get("images") or []
+                if isinstance(it, dict) and it.get("file")]
+        LOG.info("%s plan imported from %s: %d segment(s), %d frames (%.1f s), %dx%d, %d picture(s)%s", _TAG,
+                 os.path.basename(folder), count, total, total / T.FPS, out.get("width", 0), out.get("height", 0),
+                 len(pics), ", multi-person swap (Remake)" if is_swap(plan) else "")
+        return (out, count, total, summary, info, load_preview(pics))
 
 
 # --------------------------------------------------------------------------------------------------- Loop
@@ -523,11 +786,13 @@ NODE_CLASS_MAPPINGS = {
     "H3MDDirectorRH": H3MDDirectorRH,
     "H3MDLoopSamplerRH": H3MDLoopSamplerRH,
     "H3MDSaveVideoRH": H3MDSaveVideoRH,
+    "H3MDPlanImportRH": H3MDPlanImportRH,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3MDDirectorRH": "H3MD Director RH",
     "H3MDLoopSamplerRH": "H3MD Loop Sampler RH",
     "H3MDSaveVideoRH": "H3MD Save Video RH",
+    "H3MDPlanImportRH": "H3MD Plan Import RH 计划包导入",
 }
 try:
     _Tara, _NT = _tara_class()
