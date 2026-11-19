@@ -13,6 +13,8 @@ The hand-over between the passes is exact flow arithmetic, not a sampler step:
 
 import logging
 
+import time
+
 import torch
 
 import comfy.model_management
@@ -116,6 +118,23 @@ def _keyframes_at(conditioning, h, w):
     return out
 
 
+def _without_low_only_keyframes(conditioning, tag="h3md_low_only"):
+    """H3MD 0.4.9: keyframes H3MD tagged low-res only are left out of pass 2 (pass 1 fixed the composition; pass 2
+    only refines, so the painted picture is not pasted into the final frames).  Untagged keyframes stay."""
+    out = []
+    for cond, extra in conditioning:
+        kfs = extra.get("minimax_keyframes")
+        if kfs and any(kf.get(tag) for kf in kfs):
+            extra = dict(extra)
+            keep = [kf for kf in kfs if not kf.get(tag)]
+            if keep:
+                extra["minimax_keyframes"] = keep
+            else:
+                extra.pop("minimax_keyframes", None)
+        out.append([cond, extra])
+    return out
+
+
 def _restore_exact(outputs, anchors, masks):
     """Exact keep: where a mask is 0 the anchor comes back bit for bit (soft masks are the sampler's business)."""
     return [torch.where(m.to(o.device) == 0, a.to(o), o) for o, a, m in zip(outputs, anchors, masks)]
@@ -183,14 +202,55 @@ def _sample(model, noise, latent, masks, nested, positive, negative, cfg, sample
                                  disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED, seed=seed)
 
 
+def _audio_generated(masks, n_audio) -> bool:
+    """True when some audio is generated (not a locked song everywhere)."""
+    if n_audio == 0:
+        return False
+    if masks is None:
+        return True
+    return any(float(m.max()) > 0 for m in masks[1:])
+
+
+def finish_audio_low(model, positive, negative, out_streams, audio_x0, audio_eps, masks, nested, low_size, cfg,
+                     sampler, sigmas, noise_seed, batch_index):
+    """H3MD 0.5.2 (issue #5): finish generated audio when the high-res pass could not (tiling with 2+ strips keeps
+    the audio at pass 1's hand-over estimate, which is only a mid-schedule guess: dull / smeared sound).
+
+    Same recipe as the 1-strip high-res pass - same model, schedule, cfg, audio start and audio noise - but the video
+    is the FINAL video, scaled down to the low grid and held (mask 0), so this extra run is cheap (about a quarter of
+    the frame) and the audio follows the frames that are actually delivered. Returns out_streams with new audio;
+    locked audio (mask 0) is restored by the caller."""
+    tic = time.perf_counter()
+    final_video = out_streams[0]
+    low_video = _resize_video(final_video, low_size, "trilinear")
+    dev = low_video.device
+    video_noise = comfy.sample.prepare_noise(low_video, (noise_seed + 1) % (1 << 64), batch_index)
+    cont_masks = [torch.zeros(low_video.shape, device=dev)] + (
+        [m.to(dev) for m in masks[1:]] if masks is not None else [torch.ones(a.shape, device=dev) for a in audio_x0])
+    pos = _keyframes_at(_without_low_only_keyframes(positive), low_size[1], low_size[2])
+    neg = _keyframes_at(_without_low_only_keyframes(negative), low_size[1], low_size[2])
+    out = _sample(model, _pack([video_noise] + [e.to(video_noise) for e in audio_eps], nested),
+                  _pack([low_video] + [a.to(low_video.device) for a in audio_x0], nested), cont_masks, nested,
+                  pos, neg, cfg, sampler, sigmas, (noise_seed + 1) % (1 << 64))
+    finished = [s.to(device=final_video.device, dtype=final_video.dtype) for s in _split(out)[0][1:]]
+    logging.info("[Luna-H3-Sampler] audio finished on the low grid %s in %.1fs (high-res pass ran in strips and "
+                 "kept the hand-over audio); audio changed by %.4f (mean abs)", tuple(low_size),
+                 time.perf_counter() - tic,
+                 float(sum((f.float() - o.float()).abs().mean() for f, o in zip(finished, out_streams[1:]))))
+    return [final_video] + finished
+
+
 def two_pass_sample(low_res_model, positive, negative, vae, latent_image, sampler_low, sampler_high, scheduler,
                     total_steps, transition, noise_seed, cfg_low, cfg_high, lowres_scale, rho, w_min, w_max,
                     latent_lifter=None, high_res_model=None, low_res_head=None, highres_denoise=None,
                     sigmas_low=None, sigmas_high=None, lift=None, low_res_tail=None, pass1_store=None,
-                    low_only=False, low_res_base=None):
+                    low_only=False, low_res_base=None, remake_low_complete=False, audio_frozen=None,
+                    sampler_audio=None):
     """Return (latent, low_res_latent), both ComfyUI LATENT dicts in VAE space.
 
     `sigmas_low` / `sigmas_high` override the computed schedules. `lift` defaults to `luna_lift.lift_video`.
+    `audio_frozen` (H3MD 0.5.2): callable, True when pass 2 kept the audio at pass 1's hand-over estimate (H3MD
+    high-res tiling with 2+ strips); the audio is then finished by `finish_audio_low` on the low grid.
     """
     if not 1 <= transition < total_steps:
         raise ValueError("Luna-H3-Sampler: transition must be at least 1 and below total_steps")
@@ -207,7 +267,9 @@ def two_pass_sample(low_res_model, positive, negative, vae, latent_image, sample
         sigmas_high = arm_sigmas(high_model, scheduler, total_steps, transition, low=False, denoise=highres_denoise)
     _check_sigmas(sigmas_low, "sigmas_low")
     _check_sigmas(sigmas_high, "sigmas_high")
-    if not 0.0 < float(sigmas_low[-1]) < 1.0:
+    if remake_low_complete and float(sigmas_low[-1]) == 0.0:
+        pass  # official Remake 6-step finishes at 0; high-res still uses its own unchanged schedule
+    elif not 0.0 < float(sigmas_low[-1]) < 1.0:
         raise ValueError("Luna-H3-Sampler: pass 1 must stop above sigma 0 and below 1 (the transition is part-way)")
     noise_scale_high = float(getattr(ms_high, "noise_scale", 1.0))
     if noise_scale_high == 0.0:
@@ -283,10 +345,16 @@ def two_pass_sample(low_res_model, positive, negative, vae, latent_image, sample
     state_streams = [s.to(device).float() for s in _split(state_vae)[0]]
     audio_x0, audio_eps = [], []
     for state_a, x0_a in zip(state_streams[1:], x0_streams[1:]):
-        x0_vae, eps = audio_handover(state_a * scale_low * (1.0 - sigma_k), x0_a, sigma_k, sigma_s,
-                                     scale_low, scale_high)
-        audio_x0.append(x0_vae.to(audio[0].dtype))
-        audio_eps.append(eps / noise_scale_high)  # the sampler multiplies its noise by noise_scale
+        if remake_low_complete and sigma_k == 0.0:
+            # Residual eps is undefined at sigma 0; high-res re-noises audio like a new start.
+            audio_x0.append((x0_a / scale_low).to(audio[0].dtype))
+            audio_eps.append(comfy.sample.prepare_noise(x0_a, (noise_seed + 1) % (1 << 64), batch_index)
+                             / noise_scale_high)
+        else:
+            x0_vae, eps = audio_handover(state_a * scale_low * (1.0 - sigma_k), x0_a, sigma_k, sigma_s,
+                                         scale_low, scale_high)
+            audio_x0.append(x0_vae.to(audio[0].dtype))
+            audio_eps.append(eps / noise_scale_high)  # the sampler multiplies its noise by noise_scale
     if masks is not None:  # a locked song stays the song
         audio_x0 = [torch.where(m == 0, a, x) for x, a, m in zip(audio_x0, audio, masks[1:])]
 
@@ -307,7 +375,8 @@ def two_pass_sample(low_res_model, positive, negative, vae, latent_image, sample
     video_noise = comfy.sample.prepare_noise(lifted, (noise_seed + 1) % (1 << 64), batch_index)
     high_in = [lifted] + audio_x0
     out = _sample(high_model, _pack([video_noise] + [e.to(video_noise) for e in audio_eps], nested),
-                  _pack(high_in, nested), high_masks, nested, positive, negative, cfg_high, sampler_high,
+                  _pack(high_in, nested), high_masks, nested, _without_low_only_keyframes(positive),
+                  _without_low_only_keyframes(negative), cfg_high, sampler_high,
                   sigmas_high, (noise_seed + 1) % (1 << 64))
     dtype = comfy.model_management.intermediate_dtype()
     out_streams = [s.to(device=device, dtype=dtype) for s in _split(out)[0]]
@@ -316,6 +385,11 @@ def two_pass_sample(low_res_model, positive, negative, vae, latent_image, sample
                  "none" if masks is None else "mean %.3f min %.3f" % (float(masks[0].mean()), float(masks[0].min())),
                  float(lifted.float().std()), float((out_streams[0].float() - lifted.float()).abs().mean()),
                  [round(float(s), 4) for s in sigmas_high])
+    if (audio_frozen is not None and not remake_low_complete and _audio_generated(masks, len(audio))
+            and audio_frozen()):
+        out_streams = finish_audio_low(high_model, positive, negative, out_streams, audio_x0, audio_eps, masks,
+                                       nested, (T, h, w), cfg_high, sampler_audio or sampler_high, sigmas_high,
+                                       noise_seed, batch_index)
     if masks is not None:  # after the last cast, so a kept value is not rounded again
         out_streams = _restore_exact(out_streams, [video] + audio, masks)
     latent = latent_image.copy()

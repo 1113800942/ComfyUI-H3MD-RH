@@ -375,11 +375,20 @@ class H3MDSampler:
         segment before the lift (also applied to the captured carry);
         h3md_low_res_base: [1,24,T,h,w] low-grid latent for EVERY kept row (local redraw: the segment's own low-res
         result)."""
+        sigmas_low_override = unknown.pop("h3md_sigmas_low", None)
+        sigmas_high_override = unknown.pop("h3md_sigmas_high", None)
+        remake_low_complete = bool(unknown.pop("h3md_remake_low_complete", False))
         if unknown:
             LOG.warning("%s ignoring unknown inputs %s (removed options?)", _TAG, sorted(unknown))
         self.last_lowres, self.last_tiling, self.last_steps, self.last_anchor = None, None, [], None
         latent_in = sanitize_latent(latent_image)
-        sig_low, sig_high = split_sigmas(sigmas, transition_step)
+        if sigmas_low_override is not None or sigmas_high_override is not None:
+            if sigmas_low_override is None or sigmas_high_override is None:
+                raise ValueError(f"{_TAG} h3md_sigmas_low and h3md_sigmas_high must be provided together")
+            sig_low = torch.as_tensor(sigmas_low_override).flatten().float().cpu()
+            sig_high = torch.as_tensor(sigmas_high_override).flatten().float().cpu()
+        else:
+            sig_low, sig_high = split_sigmas(sigmas, transition_step)
         grid_note = exact_grid_note(latent_in, lowres_scale)
         if grid_note:
             LOG.warning("%s %s", _TAG, grid_note)
@@ -453,6 +462,7 @@ class H3MDSampler:
                  f"on ({tiling_axis}, overlap {tiling_overlap})" if highres_tiling else "off",
                  ", drift" if drift is not None else "")
         h3md_vram.log_memory("before low-res pass")
+        self._tiling_main = None
         try:
             latent, low_latent = LUNA.two_pass_sample(
                 low, positive, negative, vae, latent_in,
@@ -461,7 +471,9 @@ class H3MDSampler:
                 "simple", n_low + n_high, n_low, int(seed), float(cfg), float(cfg), float(lowres_scale),
                 float(rho), float(w_min), float(w_max), latent_lifter=lifter, high_res_model=high,
                 low_res_head=head, sigmas_low=sig_low, sigmas_high=sig_high, lift=lift, low_res_tail=tail,
-                pass1_store=h3md_progress, low_only=bool(h3md_low_only), low_res_base=base)
+                pass1_store=h3md_progress, low_only=bool(h3md_low_only), low_res_base=base,
+                remake_low_complete=remake_low_complete, sampler_audio=sampler,
+                audio_frozen=(lambda: self._audio_frozen()) if highres_tiling else None)
         except BaseException as exc:
             if not TILED.is_oom(exc) or isinstance(exc, TILED.HighResOutOfMemory):
                 raise
@@ -479,6 +491,7 @@ class H3MDSampler:
                     "请打开 highres_tiling（放得下时它不会分块）。") from exc
             raise
         h3md_vram.log_memory("after high-res pass")
+        self._restore_main_tiling()
         if passes["anchor"] is not None:
             self.last_anchor = passes["anchor"]["report"]
         if h3md_capture_lowres:
@@ -487,6 +500,32 @@ class H3MDSampler:
                 self.last_lowres = LA.apply(self.last_lowres, passes["anchor"])
             LOG.info("%s captured low-res endpoint %s", _TAG, tuple(self.last_lowres.shape))
         return ({"samples": latent["samples"]},)
+
+    def _audio_frozen(self) -> bool:
+        """0.5.2 (issue #5): True when the high-res pass ran in 2+ strips and so kept the low-res hand-over audio;
+        the engine then finishes the audio on the low grid (logged and recorded in last_tiling['audio_finish'])."""
+        st = getattr(self, "last_tiling", None) or {}
+        frozen = st.get("audio") == "low-res x0 (frozen)"
+        if frozen:
+            st["audio_finish"] = "low grid"
+            self._tiling_main = dict(st)   # the low-grid audio run goes through the same wrapper; keep these stats
+            LOG.info("%s high-res pass ran in %s strips: finishing the generated audio on the low grid "
+                     "(the strips keep the audio fixed)", _TAG, st.get("tiles_run"))
+        return frozen
+
+    def _restore_main_tiling(self):
+        main = getattr(self, "_tiling_main", None)
+        if main is None:
+            return
+        self._tiling_main = None
+        st = self.last_tiling
+        run = {"tiles": st.get("tiles_run"), "audio": st.get("audio")}
+        st.clear()
+        st.update(main)
+        st["audio_finish_run"] = run
+        if run["audio"] != "high-res":
+            LOG.warning("%s the low-grid audio run also needed strips (%s): the audio may stay dull; lower the "
+                        "resolution or the shot length", _TAG, run["tiles"])
 
     @staticmethod
     def _between_passes(on_lowres_end, unload_idle, keep):
