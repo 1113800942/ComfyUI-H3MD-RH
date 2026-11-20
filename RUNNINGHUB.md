@@ -1,7 +1,7 @@
 # H3MD RH 0.5.5-rh2 — 给 RunningHub 的说明 / Notes for RunningHub
 
-> **0.5.5-rh2（2026-11-19）**：`H3MDSaveVideoRH` 存好视频后，像 ComfyUI 自带的 Save Video 一样把成片报给 RH（`ui.images` + `animated`），任务列表里能看到成片，AI 应用也能直接选它当输出。rh1 跑完任务列表是空的。两张「导入计划包」示例里的低清 Enhancer、高清 Realism 两个 LoRA 在 RH 上没有同名文件，已旁路。
-> **0.5.5-rh2 (2026-11-19)**: `H3MDSaveVideoRH` now reports the saved video like ComfyUI's own Save Video (`ui.images` + `animated`), so it shows in the RH task list and can be an AI-app output; with rh1 the task finished with no result. In the two plan-import examples the Enhancer and Realism LoRAs (not on RH under these names) are bypassed.
+> **0.5.5-rh2（2026-11-19）**：`H3MDSaveVideoRH` 存好视频后，像 ComfyUI 自带的 Save Video 一样把成片报给 RH（`ui.images` + `animated`），任务列表里能看到成片，AI 应用也能直接选它当输出。rh1 跑完任务列表是空的。两张「导入计划包」示例里的低清 Enhancer、高清 Realism 两个 LoRA 在 RH 上没有同名文件，已旁路。两张示例还加了 ComfyUI 自带的 Save Video 节点（rh1 服务器上也能出成片），以及两个自带的浮点数节点接到 `start_s` / `end_s`：RH 发布 AI 应用时只能开放自带节点的参数。
+> **0.5.5-rh2 (2026-11-19)**: `H3MDSaveVideoRH` now reports the saved video like ComfyUI's own Save Video (`ui.images` + `animated`), so it shows in the RH task list and can be an AI-app output; with rh1 the task finished with no result. In the two plan-import examples the Enhancer and Realism LoRAs (not on RH under these names) are bypassed. Both examples also get a core Save Video node (works on rh1 servers too) and two core PrimitiveFloat nodes feeding `start_s` / `end_s`, because an RH AI app can only expose widgets of core nodes.
 
 **中文在前，English below.**
 

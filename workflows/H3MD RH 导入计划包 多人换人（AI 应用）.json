@@ -1,6 +1,6 @@
 {
- "last_node_id": 22,
- "last_link_id": 26,
+ "last_node_id": 25,
+ "last_link_id": 29,
  "nodes": [
   {
    "id": 1,
@@ -109,6 +109,22 @@
      "type": "VIDEO",
      "link": 23,
      "shape": 7
+    },
+    {
+     "name": "start_s",
+     "type": "FLOAT",
+     "widget": {
+      "name": "start_s"
+     },
+     "link": 28
+    },
+    {
+     "name": "end_s",
+     "type": "FLOAT",
+     "widget": {
+      "name": "end_s"
+     },
+     "link": 29
     }
    ],
    "outputs": [
@@ -893,7 +909,9 @@
     {
      "name": "video",
      "type": "VIDEO",
-     "links": [],
+     "links": [
+      27
+     ],
      "slot_index": 2
     },
     {
@@ -1037,6 +1055,102 @@
     "default"
    ],
    "title": "Remake 换人模型（只管低清 / low-res pass only）"
+  },
+  {
+   "id": 23,
+   "type": "SaveVideo",
+   "pos": [
+    1340,
+    1300
+   ],
+   "size": [
+    400,
+    320
+   ],
+   "flags": {},
+   "order": 22,
+   "mode": 0,
+   "title": "保存视频 Save Video（RH 任务列表 / AI 应用输出）",
+   "inputs": [
+    {
+     "name": "video",
+     "type": "VIDEO",
+     "link": 27
+    }
+   ],
+   "outputs": [],
+   "properties": {
+    "Node name for S&R": "SaveVideo"
+   },
+   "widgets_values": [
+    "video/H3MD_RH",
+    "auto",
+    "auto"
+   ]
+  },
+  {
+   "id": 24,
+   "type": "PrimitiveFloat",
+   "pos": [
+    -20,
+    60
+   ],
+   "size": [
+    320,
+    60
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "title": "起始秒 start_s（0 = 按计划包）",
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "FLOAT",
+     "type": "FLOAT",
+     "links": [
+      28
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveFloat"
+   },
+   "widgets_values": [
+    0
+   ]
+  },
+  {
+   "id": 25,
+   "type": "PrimitiveFloat",
+   "pos": [
+    -20,
+    170
+   ],
+   "size": [
+    320,
+    60
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "title": "结束秒 end_s（0 = 按计划包，最长 30 秒）",
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "FLOAT",
+     "type": "FLOAT",
+     "links": [
+      29
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveFloat"
+   },
+   "widgets_values": [
+    0
+   ]
   }
  ],
  "links": [
@@ -1223,6 +1337,30 @@
    19,
    8,
    "MODEL"
+  ],
+  [
+   27,
+   20,
+   2,
+   23,
+   0,
+   "VIDEO"
+  ],
+  [
+   28,
+   24,
+   0,
+   3,
+   2,
+   "FLOAT"
+  ],
+  [
+   29,
+   25,
+   0,
+   3,
+   3,
+   "FLOAT"
   ]
  ],
  "groups": [
