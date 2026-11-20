@@ -1,4 +1,7 @@
-# H3MD RH 0.5.5-rh1 — 给 RunningHub 的说明 / Notes for RunningHub
+# H3MD RH 0.5.5-rh2 — 给 RunningHub 的说明 / Notes for RunningHub
+
+> **0.5.5-rh2（2026-11-19）**：`H3MDSaveVideoRH` 存好视频后，像 ComfyUI 自带的 Save Video 一样把成片报给 RH（`ui.images` + `animated`），任务列表里能看到成片，AI 应用也能直接选它当输出。rh1 跑完任务列表是空的。两张「导入计划包」示例里的低清 Enhancer、高清 Realism 两个 LoRA 在 RH 上没有同名文件，已旁路。
+> **0.5.5-rh2 (2026-11-19)**: `H3MDSaveVideoRH` now reports the saved video like ComfyUI's own Save Video (`ui.images` + `animated`), so it shows in the RH task list and can be an AI-app output; with rh1 the task finished with no result. In the two plan-import examples the Enhancer and Realism LoRAs (not on RH under these names) are bypassed.
 
 **中文在前，English below.**
 
@@ -8,7 +11,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| 包名 / 版本 | `ComfyUI-H3MD-RH` 0.5.5-rh1（引擎 = 主仓库 0.5.5，`h3md_rh_core/SYNC_FROM.txt` 记着来源） |
+| 包名 / 版本 | `ComfyUI-H3MD-RH` 0.5.5-rh2（引擎 = 主仓库 0.5.5，`h3md_rh_core/SYNC_FROM.txt` 记着来源） |
 | 节点 | 5 个，类名都以 RH 结尾，和任何版本的 ComfyUI-H3MD-Director、ComfyUI-BFSNodes 都不撞名：`H3MDDirectorRH`、`H3MDPlanImportRH`（0.5.5-rh1 新增）、`H3MDLoopSamplerRH`、`H3MDSaveVideoRH`、`H3MDTaraRH` |
 | 额外的 pip 包 | **没有**（只用 ComfyUI 自带的 torch、numpy、PyAV、Pillow、transformers） |
 | 前端 / 网页接口 | **没有**：不带 `WEB_DIRECTORY`（没有前端脚本），不注册任何 HTTP 路由 |
@@ -80,7 +83,7 @@ This pack is the RunningHub build of [H3MD Director](https://github.com/11138009
 
 | Item | Detail |
 |---|---|
-| Package / version | `ComfyUI-H3MD-RH` 0.5.5-rh1 (engine = main repo 0.5.5; source in `h3md_rh_core/SYNC_FROM.txt`) |
+| Package / version | `ComfyUI-H3MD-RH` 0.5.5-rh2 (engine = main repo 0.5.5; source in `h3md_rh_core/SYNC_FROM.txt`) |
 | Nodes | 5, all class names end in RH, so no clash with any ComfyUI-H3MD-Director or ComfyUI-BFSNodes: `H3MDDirectorRH`, `H3MDPlanImportRH` (new in 0.5.5-rh1), `H3MDLoopSamplerRH`, `H3MDSaveVideoRH`, `H3MDTaraRH` |
 | Extra pip packages | **None** (only what ComfyUI ships: torch, numpy, PyAV, Pillow, transformers) |
 | Frontend / web API | **None**: no `WEB_DIRECTORY`, no HTTP routes |

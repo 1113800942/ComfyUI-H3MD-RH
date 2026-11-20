@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-h3md-rh"
 description = "H3MD RH: the RunningHub build of H3MD Director (MiniMax H3 long video). Template Director (MV / motion copy / story) fed by ComfyUI's own Load Image / Audio / Video, Plan Import for plan zips made on your own PC (uploaded with RH's Load Images From Zip V2) incl. multi-person swap (Remake), seamless motion copy (CCW), TARA built in; at most 30 s and 1 MP (swap 1664x960), 8-bit cache in temp deleted after saving."
-version = "0.5.5-rh1"
+version = "0.5.5-rh2"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "YJ" }]
 requires-python = ">=3.10"

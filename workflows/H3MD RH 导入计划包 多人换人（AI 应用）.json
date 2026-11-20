@@ -350,7 +350,7 @@
    ],
    "flags": {},
    "order": 8,
-   "mode": 0,
+   "mode": 4,
    "inputs": [
     {
      "name": "model",
@@ -375,7 +375,7 @@
     "MiniMaxH3_Enhancer_0.5-1.0_3432130_epoch_10.safetensors",
     0.5
    ],
-   "title": "低清 Enhancer"
+   "title": "低清 Enhancer（RH 上没有这个文件，已旁路 / bypassed: not on RH）"
   },
   {
    "id": 10,
@@ -471,7 +471,7 @@
    ],
    "flags": {},
    "order": 11,
-   "mode": 0,
+   "mode": 4,
    "inputs": [
     {
      "name": "model",
@@ -496,7 +496,7 @@
     "h3-realism-people-r34l1sm-1.0 strong 0.6-0.8 light.safetensors",
     0.5
    ],
-   "title": "高清 Realism"
+   "title": "高清 Realism（RH 上没有这个文件，已旁路 / bypassed: not on RH）"
   },
   {
    "id": 13,

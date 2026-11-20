@@ -718,7 +718,42 @@ class H3MDSaveVideoRH(FS.H3MDSaveVideoFaceRefineInterp):
         ui = out.get("ui", {}) if isinstance(out, dict) else {}
         state = (ui.get("h3md_cache_state") or ["?"])[0]
         LOG.info("%s video saved; segment cache: %s (%s)", _TAG, state, (ui.get("h3md_cache_dir") or ["?"])[0])
+        # 0.5.5-rh2: report the saved video like ComfyUI's own Save Video node (ui images + animated), so
+        # RunningHub lists it in the task list and an AI app can use this node as its output. Before, the video
+        # was written but never reported: the task finished with no result.
+        try:
+            res = out.get("result") if isinstance(out, dict) else None
+            entry = _rh_output_entry(res[0] if res else None)
+            if entry:
+                ui = dict(ui)
+                ui["images"] = [entry]
+                ui["animated"] = [True]
+                out = dict(out)
+                out["ui"] = ui
+                LOG.info("%s reported to RunningHub: %s/%s", _TAG, entry["subfolder"], entry["filename"])
+        except Exception as exc:  # never fail a finished render over the report
+            LOG.warning("%s could not report the video: %s", _TAG, exc)
         return out
+
+
+def _rh_output_entry(path):
+    """{filename, subfolder, type: output} for a file inside ComfyUI's output folder; a file saved elsewhere
+    (custom output_folder) is copied into output/H3MD_RH first, so it can always be listed."""
+    if not path or not isinstance(path, str) or not os.path.isfile(path):
+        return None
+    import folder_paths
+    root = os.path.abspath(folder_paths.get_output_directory())
+    ap = os.path.abspath(path)
+    if os.path.commonpath([root, ap]) != root:
+        dst_dir = os.path.join(root, "H3MD_RH")
+        os.makedirs(dst_dir, exist_ok=True)
+        dst = os.path.join(dst_dir, os.path.basename(ap))
+        if os.path.abspath(dst) != ap:
+            shutil.copy2(ap, dst)
+        ap = dst
+    rel = os.path.relpath(ap, root)
+    sub, name = os.path.split(rel)
+    return {"filename": name, "subfolder": sub.replace(os.sep, "/"), "type": "output"}
 
 
 # --------------------------------------------------------------------------------------------------- TARA
